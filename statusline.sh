@@ -10,10 +10,16 @@
 # Every line is fitted to $COLUMNS: segments first shrink to a short form,
 # then the least important ones drop. Data is local only: stdin JSON, one
 # cached git call per directory, and an incremental scan of the session transcript.
+# Caches live in a private 0700 dir ($XDG_RUNTIME_DIR or $TMPDIR, /cc-sl-$UID).
 # Helpers return through globals, never $(...): each subshell costs a fork,
 # and forks are what make status lines slow. Deps: jq, git, perl. Bash 3.2 compatible.
 
-export LC_ALL=en_US.UTF-8      # ${#str} must count characters, not bytes
+# ${#str} must count characters, not bytes: take the first UTF-8 locale that
+# exists here (a missing one silently falls back to C), checked without a fork
+{ for _l in en_US.UTF-8 C.UTF-8 en_US.utf8 C.utf8 UTF-8; do
+    LC_ALL=$_l; _t='█'; [ "${#_t}" -eq 1 ] && break
+  done; } 2>/dev/null
+export LC_ALL
 IFS= read -r -d '' input
 
 # ---------------- config ----------------
@@ -28,6 +34,7 @@ GIT_TTL=5                                   # seconds between git refreshes
 GIT_SLOW_MS=150                             # slower than this → skip untracked files (-uno)
 GIT_SLOW_TTL=15                             # refresh interval once a repo is marked slow
 GIT_SLOW_RECHECK=300                        # seconds before a slow repo is re-measured in full
+GIT_NOREPO_TTL=30                           # seconds between checks of a directory that is not a repo
 RECACHE_WARN=20000                          # tokens; warn when a cold cache costs more
 PAD=4                                       # columns Claude Code keeps around the line
 
@@ -96,6 +103,13 @@ int CTXMAX 200000; [ "$CTXMAX" -gt 0 ] || CTXMAX=200000
 SID=${SID//[^A-Za-z0-9_-]/}; [ -n "$SID" ] || SID=nosession
 
 TMP="${TMPDIR:-/tmp}"; TMP="${TMP%/}"
+# Private cache dir, shared with subagent-statusline.sh: mode 0700 and owned by
+# us, so on a shared /tmp nobody else can pre-create or symlink our cache files.
+CDIR="${XDG_RUNTIME_DIR:-$TMP}/cc-sl-$UID"
+[ -d "$CDIR" ] || mkdir -m 700 "$CDIR" 2>/dev/null
+if [ -L "$CDIR" ] || [ ! -O "$CDIR" ]; then
+  CDIR="$HOME/.cache/cc-statusline"; [ -d "$CDIR" ] || mkdir -p -m 700 "$CDIR" 2>/dev/null
+fi
 # Claude Code sets COLUMNS; 80 is the safe fallback when it is missing or nonsense
 COLS=${COLUMNS:-0}; int COLS 0; [ "$COLS" -ge 20 ] || COLS=80
 MAXW=$(( COLS - PAD ))
@@ -267,7 +281,7 @@ LW=$BW   # limit bars match the context bar
 # The key escapes "_" first, so /a/b and /a_b stay distinct; the full dir is
 # stored and checked too, in case a long path's key was cut.
 GKEY=${CWD//_/__}; GKEY=${GKEY//[^A-Za-z0-9._-]/_}; [ "${#GKEY}" -gt 120 ] && GKEY=${GKEY: -120}
-GCACHE="$TMP/cc-sl-git-$GKEY"
+GCACHE="$CDIR/git-$GKEY"
 GAT=0 SLOW=0 GDIR="" BR="" OID="" ST=0 MD=0 UN=0 CF=0 SH=0 AH=0 BH=0
 [ -f "$GCACHE" ] && { read -r GAT; read -r SLOW; read -r GDIR; read -r BR; read -r OID; read -r ST
                       read -r MD;  read -r UN;   read -r CF;   read -r SH; read -r AH;  read -r BH; } < "$GCACHE"
@@ -280,7 +294,10 @@ UFLAG=-unormal; TTL=$GIT_TTL
 if [ "$SLOW" -gt 0 ] && [ $(( NOW - SLOW )) -lt "$GIT_SLOW_RECHECK" ]; then
   UFLAG=-uno; TTL=$GIT_SLOW_TTL
 fi
-if [ $(( NOW - GAT )) -ge "$TTL" ]; then
+# not a repo at the last check: look again less often
+[ "$GAT" -gt 0 ] && [ -z "$BR" ] && TTL=$GIT_NOREPO_TTL
+# refresh when stale, or when the clock went backwards (NOW - GAT < 0 would stall)
+if [ $(( NOW - GAT )) -ge "$TTL" ] || [ "$NOW" -lt "$GAT" ]; then
   BR="" OID="" ST=0 MD=0 UN=0 CF=0 SH=0 AH=0 BH=0
   GOUT="$GCACHE.out.$$"; GTIME="$GCACHE.time.$$"
   trap 'rm -f "$GOUT" "$GTIME" "$GCACHE.$$"' EXIT   # Claude Code may kill a slow run
@@ -314,12 +331,12 @@ for v in ST MD UN CF SH AH BH; do int "$v" 0; done
 # (git output, cache files): BEL, non-colour escapes such as OSC window titles,
 # other C0 controls and UTF-8 C1 controls. Colour codes (ESC[…m) are kept.
 clean() {
-  local v=${!1}
+  local v=${!1} loc=$LC_ALL
   LC_ALL=C
   v=${v//$'\a'/}; v=${v//$'\e'[!\[]/}
   v=${v//[$'\x01'-$'\x1a'$'\x1c'-$'\x1f'$'\x7f']/ }
   v=${v//$'\xc2'[$'\x80'-$'\x9f']/ }
-  LC_ALL=en_US.UTF-8
+  LC_ALL=$loc
   printf -v "$1" '%s' "$v"
 }
 clean BR; BR=${BR//$'\e'/ }            # a branch name has no business carrying escapes
@@ -330,7 +347,7 @@ clean BR; BR=${BR//$'\e'/ }            # a branch name has no business carrying 
 # cache: byte offset, count, transcript path
 CMP=0
 if [ -f "$TRANSCRIPT" ]; then
-  CCACHE="$TMP/cc-sl-cmp-$SID"
+  CCACHE="$CDIR/cmp-$SID"
   OFF=0 CPATH=""
   [ -f "$CCACHE" ] && read -r OFF CMP CPATH < "$CCACHE"
   int OFF 0; int CMP 0
@@ -358,7 +375,7 @@ fi
 
 # subscription users (rate limits present) pay a plan, not this list-price estimate
 SUB=0
-[ "$H5" -ge 0 ] || [ "$D7" -ge 0 ] || [ "$SPL" -ge 0 ] && SUB=1
+if [ "$H5" -ge 0 ] || [ "$D7" -ge 0 ] || [ "$SPL" -ge 0 ]; then SUB=1; fi
 
 # ═════════════ LINE 1 — identity, location, git ═════════════
 case "$MODEL_ID $MODEL" in
@@ -557,7 +574,7 @@ fi
 
 # ═════════════ LINE 4 — live subagents ═════════════
 # cache: written-at, running count, segment, short segment
-ACACHE="$TMP/cc-agents-$SID"
+ACACHE="$CDIR/agents-$SID"
 if [ -f "$ACACHE" ]; then
   ASHORT=""
   { read -r AAT; read -r ACOUNT; read -r ASEG; read -r ASHORT; } < "$ACACHE"
@@ -608,12 +625,11 @@ fi
 # ---------------- housekeeping ----------------
 # once a day, in the background, remove cache files untouched for a week
 # (the last run time is stored inside the marker file, so the check needs no fork)
-TIDY="$TMP/cc-sl-tidy"; TAT=0
+TIDY="$CDIR/tidy"; TAT=0
 [ -f "$TIDY" ] && read -r TAT < "$TIDY"; int TAT 0
 if [ $(( NOW - TAT )) -ge 86400 ]; then
   printf '%s\n' "$NOW" > "$TIDY" 2>/dev/null
-  ( find "$TMP" -maxdepth 1 \( -name 'cc-sl-*' -o -name 'cc-agents-*' \) ! -name cc-sl-tidy -mtime +7 \
-      -exec rm -f {} + >/dev/null 2>&1 & )
+  ( find "$CDIR" -maxdepth 1 -type f ! -name tidy -mtime +7 -exec rm -f {} + >/dev/null 2>&1 & )
 fi
 
 # ---------------- emit ----------------

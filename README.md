@@ -48,12 +48,20 @@ path to a project-relative name), then the least important drop. The branch is n
   as a 4-minute one.
 - **Local only.** Data comes from Claude Code's stdin JSON, git, and the session
   transcript. No network calls.
-- **Robust.** Missing, `null` or malformed input never breaks the layout.
+- **Robust.** Missing, `null` or malformed input never breaks the layout. Text from git, names
+  and cache files is stripped of escape and control sequences before it reaches the terminal.
+- **Private caches.** Cache files live in a `0700` directory owned by you
+  (`$XDG_RUNTIME_DIR` or `$TMPDIR`, then `/cc-sl-$UID`, falling back to
+  `~/.cache/cc-statusline`), so a shared `/tmp` can't be used to tamper with them.
+  Files untouched for a week are removed once a day.
+- **Locale-safe.** The script picks the first UTF-8 locale available, so character widths
+  stay right on systems without `en_US.UTF-8`.
 - **Portable.** Bash 3.2 (stock macOS) and 256 colours; no Nerd Font required.
 
 ## Install
 
-Requires `jq`, `git` and `perl` (preinstalled on macOS and most Linux).
+Requires `jq` 1.6 or later built with Oniguruma regex support (Homebrew and most distro
+packages are), `git`, and `perl` (preinstalled on macOS and most Linux).
 
 ```sh
 cp statusline.sh subagent-statusline.sh ~/.claude/
@@ -95,3 +103,14 @@ GIT_SLOW_TTL=15                             # refresh interval once a repo is ma
 GIT_SLOW_RECHECK=300                        # seconds before a slow repo is re-measured in full
 RECACHE_WARN=20000                          # tokens; warn when a cold cache costs more
 ```
+
+## Tests
+
+```sh
+tests/run.sh                                                          # the scripts in this repo
+SL=~/.claude/statusline.sh SA=~/.claude/subagent-statusline.sh tests/run.sh   # the installed ones
+```
+
+Covers bad input, width fitting from 20 to 200 columns (with wide characters), context and
+limit colouring, resets, sanitising and the subagent rows. Runs in a throwaway `TMPDIR`, and
+runs `shellcheck` too when it is installed.

@@ -4,10 +4,16 @@
 # 2. Writes an aggregate segment that ~/.claude/statusline.sh shows as its agents line
 #    (cache file lines: written-at epoch, running count, segment, short segment).
 # One jq pass produces both, tagged per line, so a run costs a single fork.
-# Deps: jq.
+# Deps: jq >= 1.6 (built with Oniguruma regex support).
 
 IFS= read -r -d '' input
 TMP="${TMPDIR:-/tmp}"; TMP="${TMP%/}"
+# same private 0700 cache dir as statusline.sh
+CDIR="${XDG_RUNTIME_DIR:-$TMP}/cc-sl-$UID"
+[ -d "$CDIR" ] || mkdir -m 700 "$CDIR" 2>/dev/null
+if [ -L "$CDIR" ] || [ ! -O "$CDIR" ]; then
+  CDIR="$HOME/.cache/cc-statusline"; [ -d "$CDIR" ] || mkdir -p -m 700 "$CDIR" 2>/dev/null
+fi
 
 JQ_LIB='
 def C($n): "\u001b[38;5;\($n)m";
@@ -24,7 +30,8 @@ def bar($p; $w):
   | rep("█"; $f) + rep("░"; $w - $f);
 def kfmt($n):
   ($n | floor) as $n
-  | if   $n >= 1000000 then "\(($n/1000000)|floor).\((($n%1000000)/100000)|floor)M"
+  | if   $n >= 1000000 then ((($n % 1000000) / 100000) | floor) as $d
+       | "\(($n/1000000)|floor)" + (if $d == 0 then "" else ".\($d)" end) + "M"
     elif $n >= 10000   then "\(($n/1000)|floor)k"
     elif $n >= 1000    then "\(($n/1000)|floor).\((($n%1000)/100)|floor)k"
     else "\($n)" end;
@@ -40,6 +47,7 @@ def el($t):
   secs($t) as $s
   | if $s == null then "" else ((now - $s) | floor) as $d
     | if   $d < 0     then "0s"
+      elif $d >= 86400 then "\(($d/86400)|floor)d\((($d%86400)/3600)|floor)h"
       elif $d >= 3600 then "\(($d/3600)|floor)h\((($d%3600)/60)|floor|p2)m"
       elif $d >= 600  then "\(($d/60)|floor)m"
       elif $d >= 60   then "\(($d/60)|floor)m\(($d%60)|floor|p2)s"
@@ -71,7 +79,22 @@ def clean:
   | gsub("\u001b\\[[0-9;?]*[ -/]*[@-~]"; "")
   | gsub("\u001b\\][^\u0007\u001b]*(\u0007|\u001b\\\\)?"; "")
   | gsub("[\u0000-\u001f\u007f-\u009f]"; " ") | gsub("\\s+"; " ");
-def clip($n): if length > $n then .[0:$n-1] + "…" else . end;
+# display width: East Asian wide characters (CJK, Hangul, fullwidth, emoji, ⚡) take two columns
+def isw: (. >= 4352 and . <= 4447) or (. >= 11904 and . <= 12350) or (. >= 12353 and . <= 42191)
+      or (. >= 44032 and . <= 55203) or (. >= 63744 and . <= 64255) or (. >= 65040 and . <= 65049)
+      or (. >= 65072 and . <= 65135) or (. >= 65280 and . <= 65376) or (. >= 65504 and . <= 65510)
+      or (. >= 127744 and . <= 128591) or (. >= 128640 and . <= 128767)
+      or (. >= 129280 and . <= 129791) or . == 9889;
+def width: explode | map(if isw then 2 else 1 end) | add // 0;
+# cut to $n columns with a trailing "…", never splitting a wide character
+def clip($n):
+  if width <= $n then .
+  else (explode | reduce .[] as $c ({w: 0, o: [], done: false};
+          if .done then .
+          else (if ($c | isw) then 2 else 1 end) as $cw
+            | if .w + $cw > $n - 1 then .done = true else .w += $cw | .o += [$c] end
+          end) | .o | implode) + "…"
+  end;
 # Claude Code fills `name` with a generic "local_agent"; the agent type
 # ("ecc:code-reviewer") says what is actually running
 def agent_name:
@@ -95,7 +118,8 @@ jq -r "$JQ_LIB"'
     | ($t.model | shortmodel)                  as $md
     | ($t.effort | effort)                     as $ef
     | (if ($md|length) > 0 then $md + (if ($ef|length) > 0 then ":" + $ef else "" end) else "" end) as $mdl
-    | el($t.startTime)                         as $age
+    # elapsed only while it is still moving; a finished agent would count up forever
+    | (if $st == "running" or $st == "pending" then el($t.startTime) else "" end) as $age
     | (if $p >= 0 then bar($p; 6) + " " + ($p|tostring) + "%" else "" end) as $bar
     | ([ glyph($st), $nm, $mdl, $bar, (if $tok > 0 then kfmt($tok) else "" end), $age ]
        | map(select(length > 0)) | join("  ")) as $plain
@@ -107,9 +131,9 @@ jq -r "$JQ_LIB"'
          (if ($age|length) > 0 then C(245) + $age + RS else "" end)
        ] | map(select(length > 0)) | join("  ")) as $rich
     | (($t.description // $t.label // "") | clean) as $desc
-    | ($cols - ($plain|length) - 4) as $room
+    | ($cols - ($plain|width) - 4) as $room
     | (if ($desc|length) > 0 and $room > 10
-       then "  " + C(245) + "· " + (if ($desc|length) > $room then ($desc[0:$room-1] + "…") else $desc end) + RS
+       then "  " + C(245) + "· " + ($desc | clip($room)) + RS
        else "" end) as $tail
     | "R\t" + ({ id: $t.id, content: ($rich + $tail) } | tojson) ),
 
@@ -159,7 +183,7 @@ jq -r "$JQ_LIB"'
   done
   # write the aggregate only when jq produced one, so bad input keeps the old cache
   if [ -n "$AGG" ]; then
-    CACHE="$TMP/cc-agents-$SID"
+    CACHE="$CDIR/agents-$SID"
     printf '%s' "$AGG" > "$CACHE.$$" 2>/dev/null && mv -f "$CACHE.$$" "$CACHE" 2>/dev/null
     rm -f "$CACHE.$$" 2>/dev/null
   fi
