@@ -21,6 +21,8 @@ TONE_YEL=50; TONE_ORG=75; TONE_RED=90       # % thresholds (context; limits with
 CTX_YEL=300000; CTX_ORG=500000; CTX_RED=750000   # absolute context size, tokens (matters on 1M windows)
 PACE_YEL=95;  PACE_ORG=115; PACE_RED=130    # used% ÷ elapsed% ×100; 95+ = "near pace"
 PACE_MIN=900                                # seconds into a window before pace counts
+PACE_MIN_PCT=20                             # …and % of the window (1h of 5h, ~34h of 7d)
+PACE_ALARM=50                               # % used before pace may go past yellow, show ⇡out or warn
 COST_YEL=100; COST_ORG=500; COST_RED=2000   # cents (API-key users; dimmed on a plan)
 GIT_TTL=5                                   # seconds between git refreshes
 GIT_SLOW_MS=150                             # slower than this → skip untracked files (-uno)
@@ -498,7 +500,9 @@ pace() {
   left=$(( r - NOW )); [ "$left" -lt 0 ] && left=0
   el=$(( w - left ));  [ "$el" -lt 0 ] && el=0
   EP=$(( el * 100 / w ))
-  [ "$el" -ge "$PACE_MIN" ] || return
+  # early in a window a short burst extrapolates to nonsense (10% used 19 minutes
+  # into 5h reads as "out in 2h50m"), so pace waits for enough of the window
+  [ "$el" -ge "$PACE_MIN" ] && [ "$EP" -ge "$PACE_MIN_PCT" ] || return
   RT=$(( u * w / el ))
   [ "$u" -gt 0 ] && [ "$u" -lt 100 ] && [ "$left" -gt 0 ] || return
   ttf=$(( (100 - u) * el / u ))
@@ -520,9 +524,14 @@ limit() {
   fi
   pace "$3" "$5" "$4"
   if   [ "$3" -ge "$TONE_RED" ]; then LV=3
-  elif [ "$RT" -ge 0 ];          then level "$RT" "$PACE_YEL" "$PACE_ORG" "$PACE_RED"
+  elif [ "$RT" -ge 0 ];          then
+    level "$RT" "$PACE_YEL" "$PACE_ORG" "$PACE_RED"
+    # with little used there is nothing to alarm about yet: pace can only say "near pace"
+    [ "$3" -lt "$PACE_ALARM" ] && [ "$LV" -gt 1 ] && LV=1
   else                                tone "$3"; fi
-  # projected to run out before the reset: at least orange, like ⇡out and its warning
+  # projected to run out before the reset: at least orange, like ⇡out and its warning,
+  # but only once enough is used for the projection to matter
+  [ "$3" -lt "$PACE_ALARM" ] && PACE=""
   [ -n "$PACE" ] && [ "$LV" -lt 2 ] && LV=2
   TN=${TONES[LV]}
   [ "$LV" -gt "$WORST" ] && WORST=$LV
@@ -575,6 +584,7 @@ warn_limit() {
   elif [ "$2" -ge "$TONE_RED" ]; then W 0 "$RED" "$1 limit $2%${r}"
   else
     pace "$2" "$4" "$3"
+    [ "$2" -lt "$PACE_ALARM" ] && PACE=""
     [ -n "$PACE" ] && { span "$PACE"; W 2 "$ORG" "$1 on pace to run out in ${SP}${r}"; }
   fi
 }
