@@ -28,7 +28,7 @@ CTX_YEL=300000; CTX_ORG=500000; CTX_RED=750000   # absolute context size, tokens
 PACE_YEL=95;  PACE_ORG=115; PACE_RED=130    # used% ÷ elapsed% ×100; 95+ = "near pace"
 PACE_MIN=900                                # seconds into a window before pace counts
 PACE_MIN_PCT=20                             # …and % of the window (1h of 5h, ~34h of 7d)
-PACE_ALARM=50                               # % used before pace counts at all (colour, verdict, ⇡out, warning)
+PACE_ALARM=20                               # % used before pace counts at all (colour, verdict, ⇡out, warning)
 COST_YEL=100; COST_ORG=500; COST_RED=2000   # cents (API-key users; dimmed on a plan)
 GIT_TTL=5                                   # seconds between git refreshes
 GIT_SLOW_MS=150                             # slower than this → skip untracked files (-uno)
@@ -541,8 +541,7 @@ limit() {
   fi
   pace "$3" "$5" "$4"
   if   [ "$3" -ge "$TONE_RED" ]; then LV=3
-  # below PACE_ALARM used there is plenty left whatever the pace (21% used at 22%
-  # elapsed is "near pace" on paper, but 79% remains), so plain % decides
+  # below PACE_ALARM used there is too little to judge a pace by, so plain % decides
   elif [ "$RT" -ge 0 ] && [ "$3" -ge "$PACE_ALARM" ]; then
     level "$RT" "$PACE_YEL" "$PACE_ORG" "$PACE_RED"
   else                                tone "$3"; fi

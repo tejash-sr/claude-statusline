@@ -28,7 +28,7 @@ A fifth line of `▲` warnings appears only when something needs attention.
   halfway through the week is on track (green); 60% used 40% of the way in is red. At 90%
   and above a limit is red regardless, since the cap is near. Pace waits until 20% of the
   window has passed (1 h of 5 h), where a burst of use would extrapolate to nonsense, and
-  only from 50% used: below that there is plenty left whatever the pace, so plain % decides.
+  only from 20% used: below that there is too little to judge a pace by, so plain % decides.
 - **Context**: the bar follows % of the window (50/75/90%); the token count is coloured by
   absolute size (300k/500k/750k), so a 1M window at 34% still shows a 344k-token prompt.
   The `/compact` warning appears only at 75% of the window or a red size.
@@ -95,7 +95,7 @@ CTX_YEL=300000; CTX_ORG=500000; CTX_RED=750000   # absolute context size, tokens
 PACE_YEL=95;  PACE_ORG=115; PACE_RED=130    # used% ÷ elapsed% ×100; 95+ = "near pace"
 PACE_MIN=900                                # seconds into a window before pace counts
 PACE_MIN_PCT=20                             # …and % of the window (1h of 5h, ~34h of 7d)
-PACE_ALARM=50                               # % used before pace counts at all (colour, verdict, ⇡out, warning)
+PACE_ALARM=20                               # % used before pace counts at all (colour, verdict, ⇡out, warning)
 COST_YEL=100; COST_ORG=500; COST_RED=2000   # cents (API-key users; dimmed on a plan)
 GIT_TTL=5                                   # seconds between git refreshes
 GIT_SLOW_MS=150                             # slower than this → skip untracked files (-uno)
