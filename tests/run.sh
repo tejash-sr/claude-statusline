@@ -78,7 +78,9 @@ echo "Limits"
 out=$(run "$(limits 10 16860)")
 expect "early burst stays on track"     "$out" "on track"
 reject "early burst has no projection"  "$out" "out in"
-expect "under 50% used: near pace only" "$(run "$(limits 40 12600)")" "near pace"
+expect "under 50% used: pace ignored"   "$(run "$(limits 40 12600)")" "on track"
+expect "your case: 21% at 22% elapsed"  "$(run "$(limits 21 14100)")" "on track"
+expect "from 50% used: near pace"       "$(run "$(limits 52 8370)")" "near pace"   # 53.5% elapsed, pace 97
 out=$(run "$(limits 60 9000)")
 expect "over pace projects run-out"     "$out" "out in 1h40m"
 expect "and warns"                      "$out" "5h on pace to run out"
