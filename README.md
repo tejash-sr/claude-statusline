@@ -5,9 +5,9 @@ custom row renderer for the subagent panel.
 
 ```
 Opus 5.5:medium │ ~/Documents/project │ ⎇ main* +1 ~2 ?1 ↑1 │ #1234 ✓ │ "refactor auth middleware"
-ctx ██████░░░░░░░░░░░░░░ 34% 344k/1M │ ● cache 96% hit · cold in 57m · 3 misses │ ~$7.43 │ ⏱ 28m active │ +412/-87
-5h  ██████░░░░░░░┃░░░░░░ 30% used ⏲ 7:10 PM (1h23m) │ 7d  ██████████┃░░░░░░░░░ 52% used ⏲ Mon 1:30 AM │ ✓ on track
-agents 2 ✔1 │ ▶ code-reviewer █░░░ 41% 82k 1m36s +1 │ 131k tok
+ctx   ██████░░░░░░░░░░░░░░ 34% 344k/1M │ ● cache 96% hit · cold in 57m · 3 misses │ ~$7.43 │ ⏱ 28m active │ +412/-87
+5h    ██████░░░░░░░┃░░░░░░ 30% used ⏲ 7:10 PM (1h23m) │ 7d    ██████████┃░░░░░░░░░ 50% used ⏲ Mon 1:30 AM │ ✓ on track
+agents 2 ✔1 │ ▶ code-reviewer █░░░ 41% 82k 1m36s │ ▶ Explore █░░░ 18% 36k 40s │ 118k tok
 ```
 
 A fifth line of `▲` warnings appears only when something needs attention.
@@ -18,8 +18,8 @@ A fifth line of `▲` warnings appears only when something needs attention.
 |---|---|
 | 1 · identity | model and effort, fast mode, home-relative directory, git (branch with a `*` when dirty; staged, modified, untracked, stash, ahead/behind, conflicts), worktree, PR status, agent, vim mode, session name |
 | 2 · session | context bar, prompt cache (hit rate, time until it goes cold, session misses), estimated cost, active time, lines changed, compactions |
-| 3 · limits | 5-hour, 7-day and spend limits, like Claude's usage page: % used, reset time, an elapsed-time tick on the bar, and a verdict (`✓ on track`, or `⇡out in 2h02m` when you'll run out before the reset) |
-| 4 · agents | running subagents, largest first, with context use, tokens and age |
+| 3 · limits | 5-hour, 7-day and spend limits, like Claude's usage page: % used, reset time, an elapsed-time tick on the bar, and a verdict (`✓ on track`, `≈ near pace`, or `⇡out in 2h02m` when you'll run out before the reset). A window whose reset has passed shows `reset · new window` until fresh numbers arrive |
+| 4 · agents | running subagents, largest first, with context use, tokens and age. Agents with Claude Code's generic name (`local_agent`) are labelled by their type (`code-reviewer`) |
 | 5 · warnings | only when needed: context getting large, limits near the cap or on pace to run out, cache about to go cold, merge conflicts, branch behind upstream |
 
 **Colours mean something.**
@@ -28,8 +28,9 @@ A fifth line of `▲` warnings appears only when something needs attention.
   halfway through the week is on track (green); 60% used 40% of the way in is red. At 90%
   and above a limit is red regardless, since the cap is near. Pace is ignored for the first
   15 minutes of a window, where a burst of use extrapolates to nonsense.
-- **Context** takes the worse of % of the window (50/75/90%) and absolute size
-  (200k/400k/600k tokens), so a 1M window at 34% still reads as a 344k-token prompt.
+- **Context**: the bar follows % of the window (50/75/90%); the token count is coloured by
+  absolute size (300k/500k/750k), so a 1M window at 34% still shows a 344k-token prompt.
+  The `/compact` warning appears only at 75% of the window or a red size.
 
 Each line is fitted to the terminal width: segments first shrink (session title, then the
 path to a project-relative name), then the least important drop. The branch is never dropped.
@@ -81,8 +82,8 @@ Thresholds live at the top of `statusline.sh`:
 
 ```sh
 TONE_YEL=50; TONE_ORG=75; TONE_RED=90       # % thresholds (context; limits with no window)
-CTX_YEL=200000; CTX_ORG=400000; CTX_RED=600000   # absolute context size, tokens
-PACE_YEL=100; PACE_ORG=115; PACE_RED=130    # used% ÷ elapsed% ×100 for 5h/7d limits
+CTX_YEL=300000; CTX_ORG=500000; CTX_RED=750000   # absolute context size, tokens (matters on 1M windows)
+PACE_YEL=95;  PACE_ORG=115; PACE_RED=130    # used% ÷ elapsed% ×100; 95+ = "near pace"
 PACE_MIN=900                                # seconds into a window before pace counts
 COST_YEL=100; COST_ORG=500; COST_RED=2000   # cents (API-key users; dimmed on a plan)
 GIT_TTL=5                                   # seconds between git refreshes

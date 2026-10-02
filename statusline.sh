@@ -18,8 +18,8 @@ IFS= read -r -d '' input
 
 # ---------------- config ----------------
 TONE_YEL=50; TONE_ORG=75; TONE_RED=90       # % thresholds (context; limits with no window)
-CTX_YEL=200000; CTX_ORG=400000; CTX_RED=600000   # absolute context size, tokens
-PACE_YEL=100; PACE_ORG=115; PACE_RED=130    # used% ÷ elapsed% ×100 for 5h/7d limits
+CTX_YEL=300000; CTX_ORG=500000; CTX_RED=750000   # absolute context size, tokens (matters on 1M windows)
+PACE_YEL=95;  PACE_ORG=115; PACE_RED=130    # used% ÷ elapsed% ×100; 95+ = "near pace"
 PACE_MIN=900                                # seconds into a window before pace counts
 COST_YEL=100; COST_ORG=500; COST_RED=2000   # cents (API-key users; dimmed on a plan)
 GIT_TTL=5                                   # seconds between git refreshes
@@ -44,7 +44,10 @@ PAD=4                                       # columns Claude Code keeps around t
   read -r PC_MISS; read -r PC_RECOLD
   read -r SID;     read -r PRNUM;    read -r PRSTATE; read -r PRKIND; read -r TRANSCRIPT
 } < <(jq -r '
-  def s: if . == null then "" else tostring | gsub("[\u0000-\u001f\u007f-\u009f]"; " ") end;
+  def s: if . == null then "" else tostring
+    | gsub("\u001b\\[[0-9;?]*[ -/]*[@-~]"; "")                  # CSI, e.g. colour codes
+    | gsub("\u001b\\][^\u0007\u001b]*(\u0007|\u001b\\\\)?"; "")  # OSC, e.g. window title
+    | gsub("[\u0000-\u001f\u007f-\u009f]"; " ") end;
   def i($d): if type == "number" then floor else $d end;
   # local reset time, formatted here so the shell needs no `date` fork
   def at($f): if type == "number" and . > 0 then (strflocaltime($f) | gsub(" +"; " ") | ltrimstr(" ")) else "" end;
@@ -59,7 +62,7 @@ PAD=4                                       # columns Claude Code keeps around t
     (.context_window.used_percentage | i(-1)),
     (.context_window.total_input_tokens | i(0)),
     (.context_window.context_window_size | i(200000)),
-    (.cost.total_cost_usd // 0), ((.cost.total_cost_usd // 0) * 100 + 0.5 | floor),
+    (.cost.total_cost_usd // 0), ((.cost.total_cost_usd // 0) * 100 + 0.5 | floor | if . > 999999999999 then 999999999999 else . end),
     (.cost.total_duration_ms | i(0)), (.cost.total_api_duration_ms | i(0)),
     (.cost.total_lines_added | i(0)), (.cost.total_lines_removed | i(0)),
     (.rate_limits.five_hour.used_percentage   | i(-1)), (.rate_limits.five_hour.resets_at   | i(0)),
@@ -178,19 +181,31 @@ vlen() {
   done
   out+=$s
   VL=${#out}
-  # ⚡ is East Asian Wide: terminals draw it two columns
-  [[ $out == *⚡* ]] && { s=${out//⚡/}; VL=$(( VL + VL - ${#s} )); }
+  # East Asian Wide characters (CJK, Hangul, fullwidth forms, emoji, ⚡) take two
+  # columns; the bar, box and clock glyphs used here are narrow
+  if [[ $out == *[!\ -~]* ]]; then s=${out//$WIDE/}; VL=$(( VL + VL - ${#s} )); fi
 }
+
+WIDE="[ᄀ-ᅟ⺀-〾ぁ-ㇿ㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︐-︙︰-﹯＀-｠￠-￦🌀-🙏🚀-🛿🤀-🫿⚡]"
 
 # vtrunc TEXT N → TR   (cut to N visible columns, colour codes kept, "…" at the end)
 vtrunc() {
-  local s=$1 n=$2 c=0 seq
+  local s=$1 n=$2 c=0 seq ch
   TR=""
   while [ -n "$s" ] && [ "$c" -lt $(( n - 1 )) ]; do
     if [[ $s == $'\033['* ]]; then
+      [[ $s == *m* ]] || break          # unterminated escape: stop, don't spin
       seq=${s%%m*}m; TR+=$seq; s=${s#"$seq"}
     else
-      TR+=${s:0:1}; s=${s:1}; c=$(( c + 1 ))
+      ch=${s:0:1}; s=${s:1}
+      # wide characters take two columns; stop rather than split one at the edge
+      if [[ $ch == $WIDE ]]; then
+        [ $(( c + 2 )) -gt $(( n - 1 )) ] && break
+        c=$(( c + 2 ))
+      else
+        c=$(( c + 1 ))
+      fi
+      TR+=$ch
     fi
   done
   TR+="…${RST}"
@@ -293,6 +308,20 @@ if [ $(( NOW - GAT )) -ge "$TTL" ]; then
 fi
 for v in ST MD UN CF SH AH BH; do int "$v" 0; done
 
+# clean VAR — strip control characters from text that didn't come through jq
+# (git output, cache files): BEL, non-colour escapes such as OSC window titles,
+# other C0 controls and UTF-8 C1 controls. Colour codes (ESC[…m) are kept.
+clean() {
+  local v=${!1}
+  LC_ALL=C
+  v=${v//$'\a'/}; v=${v//$'\e'[!\[]/}
+  v=${v//[$'\x01'-$'\x1a'$'\x1c'-$'\x1f'$'\x7f']/ }
+  v=${v//$'\xc2'[$'\x80'-$'\x9f']/ }
+  LC_ALL=en_US.UTF-8
+  printf -v "$1" '%s' "$v"
+}
+clean BR; BR=${BR//$'\e'/ }            # a branch name has no business carrying escapes
+
 # ---------------- compactions: incremental transcript scan ----------------
 # Reads only the bytes appended since the last scan, and advances the offset
 # only past complete lines, so the cost stays flat however long the session.
@@ -360,7 +389,7 @@ if [ -n "$PROJ" ] && [ "$CWD" != "$PROJ" ]; then
 fi
 [ "${#DS}" -gt 24 ] && DS="…${DS: -23}"
 DX=""; [ "$ADDED" -gt 0 ] && DX=" ${DIM}+${ADDED}dir${RST}"
-add 1 6 "${TAN}${D}${RST}${DX}" "${TAN}${DS}${RST}${DX}"
+add 1 3 "${TAN}${D}${RST}${DX}" "${TAN}${DS}${RST}${DX}"
 
 if [ -n "$BR" ]; then
   [ "${#BR}" -gt 28 ] && BR="${BR:0:27}…"
@@ -376,7 +405,7 @@ if [ -n "$BR" ]; then
   add 1 1 "$G"
 fi
 
-[ -n "$WT" ] && add 1 4 "${DIM}wt:${RST}${CYN}${WT}${RST}"
+[ -n "$WT" ] && add 1 5 "${DIM}wt:${RST}${CYN}${WT}${RST}"
 
 if [ -n "$PRNUM" ]; then
   if [ "$PRKIND" = "mr" ]; then PRL="!${PRNUM}"; else PRL="#${PRNUM}"; fi
@@ -387,11 +416,11 @@ if [ -n "$PRNUM" ]; then
     pending)           P="${YEL}${PRL} ◷${RST}" ;;
     *)                 P="${YEL}${PRL}${RST}" ;;
   esac
-  add 1 3 "$P"
+  add 1 4 "$P"
 fi
 
 [ -n "$VIM" ]   && add 1 2 "${BOLD}${VIM}${RST}"
-[ -n "$AGENT" ] && add 1 5 "${YEL}@${AGENT}${RST}"
+[ -n "$AGENT" ] && add 1 6 "${YEL}@${AGENT}${RST}"
 if [ -n "$SNAME" ]; then
   SN=$SNAME;  [ "${#SN}" -gt 60 ] && SN="${SN:0:59}…"
   SNS=$SNAME; [ "${#SNS}" -gt 24 ] && SNS="${SNS:0:23}…"
@@ -400,19 +429,20 @@ fi
 [ -n "$STYLE" ] && [ "$STYLE" != "default" ] && add 1 9 "${DIM}style:${STYLE}${RST}"
 
 # ═════════════ LINE 2 — context, cache, cost, time ═════════════
-# context colour: the worse of % of the window and absolute size, because a
-# 1M window at 34% is still a 340k-token prompt on every turn
+# context: the bar and % follow % of the window; the token count is coloured by
+# absolute size, because a 1M window at 34% is still a 340k-token prompt on
+# every turn. Warnings use the worse of the two.
 kfmt "$CTXMAX"; KMAX=$K
 if [ "$PCT" -ge 0 ]; then
+  level "$TOK" "$CTX_YEL" "$CTX_ORG" "$CTX_RED"; L_TOK=$LV
+  if [ "$L_TOK" -gt 0 ]; then KC=${TONES[L_TOK]}; else KC=$DIM; fi
   tone "$PCT"; L_PCT=$LV
-  level "$TOK" "$CTX_YEL" "$CTX_ORG" "$CTX_RED"
-  [ "$LV" -lt "$L_PCT" ] && LV=$L_PCT
-  CTX_LV=$LV; TN=${TONES[LV]}
+  CTX_LV=$L_PCT; [ "$L_TOK" -gt "$CTX_LV" ] && CTX_LV=$L_TOK
   bar "$PCT" "$BW"; kfmt "$TOK"
-  add 2 0 "${DIM}ctx${RST} ${BAR} ${PCT}%${RST} ${DIM}${K}/${KMAX}${RST}"
+  add 2 0 "${DIM}ctx  ${RST} ${BAR} ${PCT}%${RST} ${KC}${K}${DIM}/${KMAX}${RST}"
 else
   CTX_LV=0; TN=$DIM; bar 0 "$BW"
-  add 2 0 "${DIM}ctx ${BAR} —  0/${KMAX}${RST}"
+  add 2 0 "${DIM}ctx   ${BAR} — 0/${KMAX}${RST}"
 fi
 
 if [ "$PC_ON" -eq 1 ]; then
@@ -435,7 +465,8 @@ fi
 
 # session cost: always "~" (Claude Code's list-price estimate); dimmed on a plan,
 # where the usage limits are the real constraint
-printf -v COSTS '~$%.2f' "$COST" 2>/dev/null || COSTS='~$?'
+if [ "${#CENTS}" -gt 7 ]; then COSTS='~$99k+'   # over $99,999: don't print 30 digits
+else printf -v COSTS '~$%.2f' "$COST" 2>/dev/null || COSTS='~$?'; fi
 if [ "$SUB" -eq 1 ]; then CC=$DIM
 elif [ "$CENTS" -ge "$COST_RED" ]; then CC=$RED
 elif [ "$CENTS" -ge "$COST_ORG" ]; then CC=$ORG
@@ -477,10 +508,16 @@ pace() {
 # limit PRIO LABEL PCT RESETS_AT WINDOW_SECS RESET_TIME
 # Colour follows pace, not the raw %: 51% used two-thirds through the week is
 # fine. At TONE_RED and above it is red whatever the pace, since the cap is near.
-ONTRACK=1
+WORST=0
 limit() {
   local S L
-  printf -v L '%-3s' "$2"   # same width as "ctx", so the bars start in one column
+  printf -v L '%-5s' "$2"   # same width as "ctx" and "spend", so bars start in one column
+  # past its reset: the numbers are the old window's until the next API response
+  if [ "$4" -gt 0 ] && [ "$4" -le "$NOW" ]; then
+    TN=$DIM; bar 0 "$LW"
+    add 3 "$1" "${DIM}${L} ${BAR} reset · new window${RST}"
+    return
+  fi
   pace "$3" "$5" "$4"
   if   [ "$3" -ge "$TONE_RED" ]; then LV=3
   elif [ "$RT" -ge 0 ];          then level "$RT" "$PACE_YEL" "$PACE_ORG" "$PACE_RED"
@@ -488,7 +525,7 @@ limit() {
   # projected to run out before the reset: at least orange, like ⇡out and its warning
   [ -n "$PACE" ] && [ "$LV" -lt 2 ] && LV=2
   TN=${TONES[LV]}
-  [ "$LV" -gt 0 ] && ONTRACK=0
+  [ "$LV" -gt "$WORST" ] && WORST=$LV
   bar "$3" "$LW" "$EP"
   S="${DIM}${L}${RST} ${BAR} $3% used${RST}"
   if [ -n "$6" ]; then
@@ -503,8 +540,11 @@ limit() {
 [ "$H5"  -ge 0 ] && limit 0 5h    "$H5"  "$H5R"  18000  "$H5T"
 [ "$D7"  -ge 0 ] && limit 1 7d    "$D7"  "$D7R"  604800 "$D7T"
 [ "$SPL" -ge 0 ] && limit 2 spend "$SPL" "$SPLR" 0      "$SPLT"
-# one verdict, like Claude's usage page
-[ "$SUB" -eq 1 ] && [ "$ONTRACK" -eq 1 ] && add 3 3 "${GRN}✓ on track${RST}"
+# one verdict, like Claude's usage page; orange and red explain themselves (⇡out, ≥90%)
+if [ "$SUB" -eq 1 ]; then
+  if   [ "$WORST" -eq 0 ]; then add 3 3 "${GRN}✓ on track${RST}"
+  elif [ "$WORST" -eq 1 ]; then add 3 3 "${YEL}≈ near pace${RST}"; fi
+fi
 
 # ═════════════ LINE 4 — live subagents ═════════════
 # cache: written-at, running count, segment, short segment
@@ -512,15 +552,16 @@ ACACHE="$TMP/cc-agents-$SID"
 if [ -f "$ACACHE" ]; then
   ASHORT=""
   { read -r AAT; read -r ACOUNT; read -r ASEG; read -r ASHORT; } < "$ACACHE"
-  int AAT 0; int ACOUNT 0
+  int AAT 0; int ACOUNT 0; clean ASEG; clean ASHORT
   [ $(( NOW - AAT )) -le 20 ] && [ "$ACOUNT" -gt 0 ] && [ -n "$ASEG" ] && add 4 0 "$ASEG" "$ASHORT"
 fi
 
 # ═════════════ LINE 5 — warnings ═════════════
 W() { add 5 "$1" "${2}▲ $3${RST}"; }
 
-if   [ "$CTX_LV" -ge 3 ]; then kfmt "$TOK"; W 0 "$RED" "context ${PCT}% (${K}) — /compact now"
-elif [ "$CTX_LV" -ge 2 ]; then kfmt "$TOK"; W 1 "$ORG" "context ${PCT}% (${K}) — /compact soon"
+# only at red, or from 75% of the window: an always-on row gets ignored
+if   [ "$CTX_LV" -ge 3 ];          then kfmt "$TOK"; W 0 "$RED" "context ${PCT}% (${K}) — /compact now"
+elif [ "$PCT" -ge "$TONE_ORG" ];    then kfmt "$TOK"; W 1 "$ORG" "context ${PCT}% (${K}) — /compact soon"
 fi
 
 [ "$CF" -gt 0 ] && { plural "$CF" "merge conflict" s; W 0 "$RED" "$PL"; }
@@ -528,6 +569,7 @@ fi
 # warn_limit LABEL PCT RESETS_AT WINDOW_SECS RESET_TIME
 warn_limit() {
   local r=""
+  [ "$3" -gt 0 ] && [ "$3" -le "$NOW" ] && return   # already reset
   [ -n "$5" ] && r=" · resets $5"
   if   [ "$2" -ge 100 ];         then W 0 "$RED" "$1 limit reached${r}"
   elif [ "$2" -ge "$TONE_RED" ]; then W 0 "$RED" "$1 limit $2%${r}"
