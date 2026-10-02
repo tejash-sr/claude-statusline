@@ -6,7 +6,7 @@ custom row renderer for the subagent panel.
 ```
 Opus 5.5:medium │ ~/Documents/project │ ⎇ main* +1 ~2 ?1 ↑1 │ #1234 ✓ │ "refactor auth middleware"
 ctx   ██████░░░░░░░░░░░░░░ 34% 344k/1M │ ● cache 96% hit · cold in 57m · 3 misses │ ~$7.43 │ ⏱ 28m active │ +412/-87
-5h    ██████░░░░░░░┃░░░░░░ 30% used ⏲ 7:10 PM (1h23m) │ 7d    ██████████┃░░░░░░░░░ 50% used ⏲ Mon 1:30 AM │ ✓ on track
+5h    ██████░░░░░░░┃░░░░░░ 30% ⏲ 7:10 PM (1h23m) ✓ on track │ 7d    ██████████┃░░░░░░░░░ 50% ⏲ Mon 1:30 AM ✓ on track
 agents 2 ✔1 │ ▶ code-reviewer █░░░ 41% 82k 1m36s │ ▶ Explore █░░░ 18% 36k 40s │ 118k tok
 ```
 
@@ -18,17 +18,18 @@ A fifth line of `▲` warnings appears only when something needs attention.
 |---|---|
 | 1 · identity | model and effort, fast mode, home-relative directory, git (branch with a `*` when dirty; staged, modified, untracked, stash, ahead/behind, conflicts), worktree, PR status, agent, vim mode, session name |
 | 2 · session | context bar, prompt cache (hit rate, time until it goes cold, session misses), estimated cost, active time, lines changed, compactions |
-| 3 · limits | 5-hour, 7-day and spend limits, like Claude's usage page: % used, reset time, an elapsed-time tick on the bar, and a verdict (`✓ on track`, `≈ near pace`, or `⇡out in 2h02m` when you'll run out before the reset). A window whose reset has passed shows `reset · new window` until fresh numbers arrive |
+| 3 · limits | 5-hour, 7-day and spend limits, like Claude's usage page: % used, reset time, an elapsed-time tick on the bar, and a verdict for each limit (`✓ on track`, `≈ near pace`, or `⇡out in 2h02m` when you'll run out well before the reset). A window whose reset has passed shows `reset · new window` until fresh numbers arrive |
 | 4 · agents | running subagents, largest first, with context use, tokens and age. Agents with Claude Code's generic name (`local_agent`) are labelled by their type (`code-reviewer`) |
 | 5 · warnings | only when needed: context getting large, limits near the cap or on pace to run out, cache about to go cold, merge conflicts, branch behind upstream |
 
 **Colours mean something.**
 
-- **Limits** are coloured by pace, not raw %: used% ÷ elapsed% of the window. 52% used
-  halfway through the week is on track (green); 60% used 40% of the way in is red. At 90%
-  and above a limit is red regardless, since the cap is near. Pace waits until 20% of the
-  window has passed (1 h of 5 h), where a burst of use would extrapolate to nonsense, and
-  only from 20% used: below that there is too little to judge a pace by, so plain % decides.
+- **Limits** are coloured by pace: the projected usage at the reset at the current rate
+  (used% ÷ elapsed% of the window). Under 100% is green `✓ on track`; 100% or more is yellow
+  `≈ near pace`; running out at least 10% of the window before the reset (30 min of 5h) is
+  orange or red with `⇡out in …` and a warning, so a near tie doesn't flicker into an alarm.
+  At 90% used a limit is red regardless. Pace waits until 20% of the window has passed and
+  20% is used; before that plain % decides.
 - **Context**: the bar follows % of the window (50/75/90%); the token count is coloured by
   absolute size (300k/500k/750k), so a 1M window at 34% still shows a 344k-token prompt.
   The `/compact` warning appears only at 75% of the window or a red size.
@@ -92,7 +93,8 @@ Thresholds live at the top of `statusline.sh`:
 ```sh
 TONE_YEL=50; TONE_ORG=75; TONE_RED=90       # % thresholds (context; limits with no window)
 CTX_YEL=300000; CTX_ORG=500000; CTX_RED=750000   # absolute context size, tokens (matters on 1M windows)
-PACE_YEL=95;  PACE_ORG=115; PACE_RED=130    # used% ÷ elapsed% ×100; 95+ = "near pace"
+PACE_RED=130                                # projected % at reset at which a run-out turns red
+PACE_MARGIN_PCT=10                          # run-out counts only this % of the window before the reset
 PACE_MIN=900                                # seconds into a window before pace counts
 PACE_MIN_PCT=20                             # …and % of the window (1h of 5h, ~34h of 7d)
 PACE_ALARM=20                               # % used before pace counts at all (colour, verdict, ⇡out, warning)

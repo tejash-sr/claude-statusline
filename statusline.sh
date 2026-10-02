@@ -3,7 +3,7 @@
 #
 #   1  identity  model:effort ⚡ │ dir │ git │ worktree │ PR │ agent │ session
 #   2  session   context bar │ prompt cache │ ~cost │ active time │ churn │ compactions
-#   3  limits    5h │ 7d │ spend  (pace-coloured bars with an elapsed tick, reset time, verdict)
+#   3  limits    5h │ 7d │ spend  (pace-coloured bars, elapsed tick, reset time, verdict each)
 #   4  agents    live subagents (written by ~/.claude/subagent-statusline.sh)
 #   5  warnings  only when something needs attention
 #
@@ -25,7 +25,8 @@ IFS= read -r -d '' input
 # ---------------- config ----------------
 TONE_YEL=50; TONE_ORG=75; TONE_RED=90       # % thresholds (context; limits with no window)
 CTX_YEL=300000; CTX_ORG=500000; CTX_RED=750000   # absolute context size, tokens (matters on 1M windows)
-PACE_YEL=95;  PACE_ORG=115; PACE_RED=130    # used% ÷ elapsed% ×100; 95+ = "near pace"
+PACE_RED=130                                # projected % at reset at which a run-out turns red
+PACE_MARGIN_PCT=10                          # run-out counts only this % of the window before the reset
 PACE_MIN=900                                # seconds into a window before pace counts
 PACE_MIN_PCT=20                             # …and % of the window (1h of 5h, ~34h of 7d)
 PACE_ALARM=20                               # % used before pace counts at all (colour, verdict, ⇡out, warning)
@@ -507,9 +508,10 @@ fi
 # ═════════════ LINE 3 — usage limits ═════════════
 # pace USED_PCT WINDOW_SECS RESETS_AT →
 #   EP    elapsed % of the window (-1 if unknown)
-#   RT    used% ÷ elapsed% ×100 (-1 until PACE_MIN into the window, when a few
-#         minutes of heavy use would extrapolate to nonsense)
-#   PACE  seconds until 100% at this rate, set only when that lands before the reset
+#   RT    projected % used at the reset at the current rate (used% ÷ elapsed% ×100);
+#         -1 until PACE_MIN and PACE_MIN_PCT into the window, or below PACE_ALARM used
+#   PACE  seconds until 100% at this rate, set only when that lands at least
+#         PACE_MARGIN_PCT of the window before the reset
 pace() {
   local u=$1 w=$2 r=$3 left el ttf
   EP=-1; RT=-1; PACE=""
@@ -518,20 +520,24 @@ pace() {
   el=$(( w - left ));  [ "$el" -lt 0 ] && el=0
   EP=$(( el * 100 / w ))
   # early in a window a short burst extrapolates to nonsense (10% used 19 minutes
-  # into 5h reads as "out in 2h50m"), so pace waits for enough of the window
-  [ "$el" -ge "$PACE_MIN" ] && [ "$EP" -ge "$PACE_MIN_PCT" ] || return
+  # into 5h reads as "out in 2h50m"); with little used there is nothing to judge
+  [ "$el" -ge "$PACE_MIN" ] && [ "$EP" -ge "$PACE_MIN_PCT" ] && [ "$u" -ge "$PACE_ALARM" ] || return
   RT=$(( u * w / el ))
-  [ "$u" -gt 0 ] && [ "$u" -lt 100 ] && [ "$left" -gt 0 ] || return
+  [ "$u" -lt 100 ] && [ "$left" -gt 0 ] || return
   ttf=$(( (100 - u) * el / u ))
-  [ "$ttf" -lt "$left" ] && PACE=$ttf
+  # a run-out minutes before the reset is a tie, not a warning: flicker otherwise
+  [ $(( left - ttf )) -ge $(( w * PACE_MARGIN_PCT / 100 )) ] && PACE=$ttf
 }
 
 # limit PRIO LABEL PCT RESETS_AT WINDOW_SECS RESET_TIME
-# Colour follows pace, not the raw %: 51% used two-thirds through the week is
-# fine. At TONE_RED and above it is red whatever the pace, since the cap is near.
-WORST=0
+# Colour and verdict follow the projected usage at the reset, not the raw %:
+#   under 100%                          green   ✓ on track
+#   100% or more, but only just         yellow  ≈ near pace
+#   runs out PACE_MARGIN_PCT early      orange  ⇡out in 3h35m  (red from PACE_RED)
+# At TONE_RED used and above it is red whatever the pace, since the cap is near.
+# Before pace can be judged, plain % decides and there is no verdict past green.
 limit() {
-  local S L
+  local S SS L V=""
   printf -v L '%-5s' "$2"   # same width as "ctx" and "spend", so bars start in one column
   # past its reset: the numbers are the old window's until the next API response
   if [ "$4" -gt 0 ] && [ "$4" -le "$NOW" ]; then
@@ -541,35 +547,36 @@ limit() {
   fi
   pace "$3" "$5" "$4"
   if   [ "$3" -ge "$TONE_RED" ]; then LV=3
-  # below PACE_ALARM used there is too little to judge a pace by, so plain % decides
-  elif [ "$RT" -ge 0 ] && [ "$3" -ge "$PACE_ALARM" ]; then
-    level "$RT" "$PACE_YEL" "$PACE_ORG" "$PACE_RED"
+  elif [ -n "$PACE" ];           then if [ "$RT" -ge "$PACE_RED" ]; then LV=3; else LV=2; fi
+  elif [ "$RT" -ge 100 ];        then LV=1
+  elif [ "$RT" -ge 0 ];          then LV=0
   else                                tone "$3"; fi
-  # projected to run out before the reset: at least orange, like ⇡out and its warning,
-  # but only once enough is used for the projection to matter
-  [ "$3" -lt "$PACE_ALARM" ] && PACE=""
-  [ -n "$PACE" ] && [ "$LV" -lt 2 ] && LV=2
   TN=${TONES[LV]}
-  [ "$LV" -gt "$WORST" ] && WORST=$LV
+  # verdict, per limit (a window with no length, like spend, gets none)
+  if [ "$5" -gt 0 ]; then
+    if   [ -n "$PACE" ];  then span "$PACE"; V="${TN}⇡out in ${SP}${RST}"
+    elif [ "$LV" -eq 0 ]; then V="${GRN}✓ on track${RST}"
+    elif [ "$LV" -eq 1 ] && [ "$RT" -ge 100 ]; then V="${YEL}≈ near pace${RST}"; fi
+  fi
   bar "$3" "$LW" "$EP"
-  S="${DIM}${L}${RST} ${BAR} $3% used${RST}"
+  S="${DIM}${L}${RST} ${BAR} $3%${RST}"
+  SS=$S
   if [ -n "$6" ]; then
     S="${S} ${DIM}⏲ $6"
     # 5h only: in a short window the time left matters more than the clock time
     [ "$5" -eq 18000 ] && [ "$4" -gt "$NOW" ] && { span $(( $4 - NOW )); S="${S} (${SP})"; }
     S="${S}${RST}"
   fi
-  [ -n "$PACE" ] && { span "$PACE"; S="${S} ${ORG}⇡out in ${SP}${RST}"; }
-  add 3 "$1" "$S"
+  if [ -n "$V" ]; then
+    S="${S} ${V}"
+    # short form: the verdict's symbol only
+    case "$V" in *"✓"*) SS="${SS} ${GRN}✓${RST}" ;; *"≈"*) SS="${SS} ${YEL}≈${RST}" ;; *) SS="${SS} ${V}" ;; esac
+  fi
+  add 3 "$1" "$S" "$SS"
 }
 [ "$H5"  -ge 0 ] && limit 0 5h    "$H5"  "$H5R"  18000  "$H5T"
 [ "$D7"  -ge 0 ] && limit 1 7d    "$D7"  "$D7R"  604800 "$D7T"
 [ "$SPL" -ge 0 ] && limit 2 spend "$SPL" "$SPLR" 0      "$SPLT"
-# one verdict, like Claude's usage page; orange and red explain themselves (⇡out, ≥90%)
-if [ "$SUB" -eq 1 ]; then
-  if   [ "$WORST" -eq 0 ]; then add 3 3 "${GRN}✓ on track${RST}"
-  elif [ "$WORST" -eq 1 ]; then add 3 3 "${YEL}≈ near pace${RST}"; fi
-fi
 
 # ═════════════ LINE 4 — live subagents ═════════════
 # cache: written-at, running count, segment, short segment
@@ -600,7 +607,6 @@ warn_limit() {
   elif [ "$2" -ge "$TONE_RED" ]; then W 0 "$RED" "$1 limit $2%${r}"
   else
     pace "$2" "$4" "$3"
-    [ "$2" -lt "$PACE_ALARM" ] && PACE=""
     [ -n "$PACE" ] && { span "$PACE"; W 2 "$ORG" "$1 on pace to run out in ${SP}${r}"; }
   fi
 }

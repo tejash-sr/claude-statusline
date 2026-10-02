@@ -74,20 +74,26 @@ expect "size shown"                     "$out" "421k/1M"
 expect "warning from 75% of the window" "$(run '{"context_window":{"used_percentage":80,"total_input_tokens":160000,"context_window_size":200000}}')" "compact soon"
 expect "red size says now"              "$(run '{"context_window":{"used_percentage":78,"total_input_tokens":780000,"context_window_size":1000000}}')" "compact now"
 
-echo "Limits"
+echo "Limits (pace = projected % used at the reset)"
 out=$(run "$(limits 10 16860)")
 expect "early burst stays on track"     "$out" "on track"
 reject "early burst has no projection"  "$out" "out in"
-expect "under 20% used: pace ignored"   "$(run "$(limits 15 12600)")" "on track"   # pace 50 at 30% elapsed, but only 15% used
-expect "21% at 22% elapsed: near pace"  "$(run "$(limits 21 14100)")" "near pace"  # pace 97
-expect "52% at 53.5% elapsed: near pace" "$(run "$(limits 52 8370)")" "near pace"  # pace 97
-expect "40% at 30% elapsed: runs out"   "$(run "$(limits 40 12600)")" "out in"     # pace 133
-out=$(run "$(limits 60 9000)")
-expect "over pace projects run-out"     "$out" "out in 1h40m"
+expect "under 20% used: pace ignored"   "$(run "$(limits 15 12600)")" "on track"   # 15% at 30% elapsed
+expect "projected 97%: on track"        "$(run "$(limits 21 14100)")" "on track"
+out=$(run "$(limits 26 13380)")                                                     # your case: 26% at 25.7%, ~101%
+expect "projected ~101%: near pace"     "$out" "near pace"
+reject "a near tie is not a run-out"    "$out" "out in"
+reject "and raises no warning"          "$out" "▲"
+expect "52% halfway: near pace"         "$(run "$(limits 52 9000)")" "near pace"  # 104%, run-out 12 min early
+out=$(run "$(limits 60 9000)")                                                      # 120%, 50 min early
+expect "meaningfully early: run-out"    "$out" "out in 1h40m"
 expect "and warns"                      "$out" "5h on pace to run out"
 expect "≥90% warns regardless"          "$(run "$(limits 92 1800)")" "5h limit 92%"
 expect "past reset shows new window"    "$(run "$(limits 80 -100)")" "reset · new window"
 expect "5h shows a countdown"           "$(run "$(limits 30 5010)")" "(1h23m)"   # 1h23m30s: margin for the clock ticking
+reject "no 'used' after the %"          "$(run "$(limits 30 5010)")" "% used"
+out=$(jq -n --argjson n "$NOW" '{rate_limits:{five_hour:{used_percentage:26,resets_at:($n+13380)},seven_day:{used_percentage:30,resets_at:($n+300000)}}}' | COLUMNS=200 "$SL")
+expect "each limit has its own verdict" "$out" "near pace.*7d.*on track"
 
 echo "Sanitising"
 reject "escape codes leave no residue"  "$(run '{"session_name":"a\u001b[31mred\u001b[0m b"}')" '\[31m'
