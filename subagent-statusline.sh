@@ -2,7 +2,7 @@
 # ~/.claude/subagent-statusline.sh
 # 1. Renders each subagent row in the agent panel (stdout, one JSON object per row).
 # 2. Writes an aggregate segment that ~/.claude/statusline.sh shows as its agents line
-#    (cache file lines: written-at epoch, running count, segment).
+#    (cache file lines: written-at epoch, running count, segment, short segment).
 # Deps: jq.
 
 input=$(cat)
@@ -60,7 +60,8 @@ def shortmodel: (. // "") | tostring | sub("^claude-"; "") | sub("-[0-9]{8}$"; "
 def effort: if . == null then "" elif type == "number" then kfmt(.) else tostring end;
 def pct($t): (($t.contextWindowSize // 0) as $cw | ($t.tokenCount // 0) as $tk
               | if $cw > 0 then clamp(($tk * 100 / $cw | floor); 0; 999) else -1 end);
-def clean: tostring | gsub("[\u0000-\u001f]"; " ") | gsub("\\s+"; " ");
+def clean: tostring | gsub("[\u0000-\u001f\u007f-\u009f]"; " ") | gsub("\\s+"; " ");
+def clip($n): if length > $n then .[0:$n-1] + "…" else . end;
 '
 
 # ---------- 1. per-row output ----------
@@ -69,7 +70,7 @@ printf '%s' "$input" | jq -c "$JQ_LIB"'
 | (.tasks // [])[]
 | . as $t
 | ($t.status // "")                        as $st
-| (($t.name // $t.type // "agent") | clean) as $nm
+| (($t.name // $t.type // "agent") | clean | clip(28)) as $nm
 | ($t.tokenCount // 0)                     as $tok
 | pct($t)                                  as $p
 | ($t.model | shortmodel)                  as $md
@@ -121,6 +122,15 @@ printf '%s' "$input" | jq -r "$JQ_LIB"'
          + " " + C(245) + "│" + RS + " " + $rows
          + (if $n > $show then " " + C(245) + "+" + (($n - $show)|tostring) + RS else "" end)
          + " " + C(245) + "│" + RS + " " + C(245) + kfmt($tot) + " tok" + RS
+    end ),
+  # short form for narrow terminals: count and the largest agent only
+  ( if $n == 0 then ""
+    else ($run | sort_by(-(.tokenCount // 0))[0]) as $top
+      | pct($top) as $p
+      | C(245) + "agents" + RS + " " + C(109) + ($n|tostring) + RS + " "
+        + C(109) + "▶" + RS + " " + C(110) + (($top.name // $top.type // "agent") | clean | clip(14)) + RS
+        + (if $p >= 0 then " " + tone($p) + ($p|tostring) + "%" + RS else "" end)
+        + (if $n > 1 then " " + C(245) + "+" + (($n - 1)|tostring) + RS else "" end)
     end )
 ' > "$CACHE.$$" 2>/dev/null && mv -f "$CACHE.$$" "$CACHE" 2>/dev/null
 rm -f "$CACHE.$$" 2>/dev/null

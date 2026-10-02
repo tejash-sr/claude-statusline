@@ -3,22 +3,29 @@
 #
 #   1  identity  model:effort ⚡ │ dir │ git │ worktree │ PR │ agent │ session
 #   2  session   context bar │ prompt cache │ ~cost │ active time │ churn │ compactions
-#   3  limits    5h │ 7d │ spend  (bars, ⏲ reset countdown, pace projection)
+#   3  limits    5h │ 7d │ spend  (pace-coloured bars with an elapsed tick, reset time, verdict)
 #   4  agents    live subagents (written by ~/.claude/subagent-statusline.sh)
 #   5  warnings  only when something needs attention
 #
-# Every line is fitted to $COLUMNS by dropping its least important segments.
-# Data is local only: stdin JSON, one cached git call, the session transcript.
+# Every line is fitted to $COLUMNS: segments first shrink to a short form,
+# then the least important ones drop. Data is local only: stdin JSON, one
+# cached git call per directory, and an incremental scan of the session transcript.
 # Helpers return through globals, never $(...): each subshell costs a fork,
-# and forks are what make status lines slow. Deps: jq, git. Bash 3.2 compatible.
+# and forks are what make status lines slow. Deps: jq, git, perl. Bash 3.2 compatible.
 
 export LC_ALL=en_US.UTF-8      # ${#str} must count characters, not bytes
 IFS= read -r -d '' input
 
 # ---------------- config ----------------
-TONE_YEL=50; TONE_ORG=75; TONE_RED=90       # % thresholds for context and limits
-COST_YEL=100; COST_ORG=500; COST_RED=2000   # cents
-GIT_TTL=3                                   # seconds between git refreshes
+TONE_YEL=50; TONE_ORG=75; TONE_RED=90       # % thresholds (context; limits with no window)
+CTX_YEL=200000; CTX_ORG=400000; CTX_RED=600000   # absolute context size, tokens
+PACE_YEL=100; PACE_ORG=115; PACE_RED=130    # used% ÷ elapsed% ×100 for 5h/7d limits
+PACE_MIN=900                                # seconds into a window before pace counts
+COST_YEL=100; COST_ORG=500; COST_RED=2000   # cents (API-key users; dimmed on a plan)
+GIT_TTL=5                                   # seconds between git refreshes
+GIT_SLOW_MS=150                             # slower than this → skip untracked files (-uno)
+GIT_SLOW_TTL=15                             # refresh interval once a repo is marked slow
+GIT_SLOW_RECHECK=300                        # seconds before a slow repo is re-measured in full
 RECACHE_WARN=20000                          # tokens; warn when a cold cache costs more
 PAD=4                                       # columns Claude Code keeps around the line
 
@@ -30,13 +37,17 @@ PAD=4                                       # columns Claude Code keeps around t
   read -r AGENT;   read -r STYLE
   read -r PCT;     read -r TOK;      read -r CTXMAX
   read -r COST;    read -r CENTS;    read -r DUR_MS; read -r API_MS; read -r ADD; read -r DEL
-  read -r H5;      read -r H5R;      read -r D7;     read -r D7R;    read -r SPL; read -r SPLR
+  read -r H5;      read -r H5R;      read -r H5T
+  read -r D7;      read -r D7R;      read -r D7T
+  read -r SPL;     read -r SPLR;     read -r SPLT
   read -r PC_ON;   read -r PC_WARM;  read -r PC_TTL; read -r PC_EXP; read -r PC_HIT
   read -r PC_MISS; read -r PC_RECOLD
   read -r SID;     read -r PRNUM;    read -r PRSTATE; read -r PRKIND; read -r TRANSCRIPT
 } < <(jq -r '
-  def s: if . == null then "" else tostring | gsub("[\n\r\t\u001b\u0007]"; " ") end;
+  def s: if . == null then "" else tostring | gsub("[\u0000-\u001f\u007f-\u009f]"; " ") end;
   def i($d): if type == "number" then floor else $d end;
+  # local reset time, formatted here so the shell needs no `date` fork
+  def at($f): if type == "number" and . > 0 then (strflocaltime($f) | gsub(" +"; " ") | ltrimstr(" ")) else "" end;
   [ (now | floor),
     (.model.display_name // "?"), (.model.id // ""),
     (.workspace.current_dir // .cwd // "."), (.workspace.project_dir // ""),
@@ -48,16 +59,19 @@ PAD=4                                       # columns Claude Code keeps around t
     (.context_window.used_percentage | i(-1)),
     (.context_window.total_input_tokens | i(0)),
     (.context_window.context_window_size | i(200000)),
-    (.cost.total_cost_usd // 0), ((.cost.total_cost_usd // 0) * 100 | floor),
+    (.cost.total_cost_usd // 0), ((.cost.total_cost_usd // 0) * 100 + 0.5 | floor),
     (.cost.total_duration_ms | i(0)), (.cost.total_api_duration_ms | i(0)),
     (.cost.total_lines_added | i(0)), (.cost.total_lines_removed | i(0)),
     (.rate_limits.five_hour.used_percentage   | i(-1)), (.rate_limits.five_hour.resets_at   | i(0)),
+    (.rate_limits.five_hour.resets_at   | at("%l:%M %p")),
     (.rate_limits.seven_day.used_percentage   | i(-1)), (.rate_limits.seven_day.resets_at   | i(0)),
+    (.rate_limits.seven_day.resets_at   | at("%a %l:%M %p")),
     (.rate_limits.spend_limit.used_percentage | i(-1)), (.rate_limits.spend_limit.resets_at | i(0)),
+    (.rate_limits.spend_limit.resets_at | at("%b %e")),
     (if .prompt_cache.caching_observed == true then 1 else 0 end),
     (if .prompt_cache.warm == true then 1 else 0 end),
     (.prompt_cache.ttl // ""), (.prompt_cache.expires_at | i(0)),
-    (if (.prompt_cache.hit_ratio | type) == "number" then (.prompt_cache.hit_ratio * 100 | floor) else -1 end),
+    (if (.prompt_cache.hit_ratio | type) == "number" then (.prompt_cache.hit_ratio * 100 + 0.5 | floor) else -1 end),
     (.prompt_cache.misses | i(0)), (.prompt_cache.recache_tokens_if_cold | i(0)),
     (.session_id // "nosession"), (.pr.number // ""), (.pr.review_state // ""), (.pr.kind // ""),
     (.transcript_path // "")
@@ -68,7 +82,8 @@ int() { [[ ${!1} =~ ^-?[0-9]+$ ]] || printf -v "$1" '%s' "$2"; }
 for v in ADDED TOK DUR_MS API_MS ADD DEL H5R D7R SPLR PC_ON PC_WARM PC_EXP \
          PC_MISS PC_RECOLD CENTS; do int "$v" 0; done
 for v in PCT H5 D7 SPL PC_HIT; do int "$v" -1; done
-int CTXMAX 200000
+int CTXMAX 200000; [ "$CTXMAX" -gt 0 ] || CTXMAX=200000
+[ "${#CENTS}" -le 12 ] || CENTS=999999999999   # absurd cost: keep [ ] arithmetic valid
 [[ $NOW =~ ^[0-9]+$ ]] || NOW=$(date +%s)
 [[ $COST =~ ^[0-9.eE+-]+$ ]] || COST=0
 [ -n "$MODEL" ] || MODEL="?"
@@ -76,7 +91,8 @@ int CTXMAX 200000
 SID=${SID//[^A-Za-z0-9_-]/}; [ -n "$SID" ] || SID=nosession
 
 TMP="${TMPDIR:-/tmp}"; TMP="${TMP%/}"
-COLS=${COLUMNS:-0}; int COLS 0; [ "$COLS" -ge 40 ] || COLS=120
+# Claude Code sets COLUMNS; 80 is the safe fallback when it is missing or nonsense
+COLS=${COLUMNS:-0}; int COLS 0; [ "$COLS" -ge 20 ] || COLS=80
 MAXW=$(( COLS - PAD ))
 
 # ---------------- palette (256-colour) ----------------
@@ -86,15 +102,19 @@ ORG="${E}38;5;208m"; RED="${E}38;5;203m"; CYN="${E}38;5;109m"; BLU="${E}38;5;110
 MAG="${E}38;5;176m"; TAN="${E}38;5;180m"; PUR="${E}38;5;140m"
 BOLD="${E}1m"; RST="${E}0m"
 SEP=" ${DIM}│${RST} "
+TONES=("$GRN" "$YEL" "$ORG" "$RED")   # severity 0..3
 
 # ---------------- helpers (results in globals) ----------------
-# tone PCT → TN   (higher is worse: context, limits)
-tone() {
-  if   [ "$1" -ge "$TONE_RED" ]; then TN=$RED
-  elif [ "$1" -ge "$TONE_ORG" ]; then TN=$ORG
-  elif [ "$1" -ge "$TONE_YEL" ]; then TN=$YEL
-  else                                TN=$GRN; fi
+# level VALUE YEL ORG RED → LV (severity 0..3)
+level() {
+  if   [ "$1" -ge "$4" ]; then LV=3
+  elif [ "$1" -ge "$3" ]; then LV=2
+  elif [ "$1" -ge "$2" ]; then LV=1
+  else                         LV=0; fi
 }
+
+# tone PCT → TN, LV   (higher is worse)
+tone() { level "$1" "$TONE_YEL" "$TONE_ORG" "$TONE_RED"; TN=${TONES[LV]}; }
 
 # tone_up PCT → TU   (higher is better: cache hit ratio)
 tone_up() {
@@ -103,15 +123,18 @@ tone_up() {
   else                       TU=$ORG; fi
 }
 
-# bar PCT WIDTH → BAR
+# bar PCT WIDTH [TICK_PCT] → BAR, coloured with $TN; an optional tick in the
+# foreground colour marks how much of a time window has elapsed
 bar() {
-  local p=$1 w=$2 f e B
-  BAR=""
+  local p=$1 w=$2 tk=${3:--1} f i c out=""
   [ "$p" -lt 0 ] && p=0
   f=$(( p * w / 100 )); [ "$f" -gt "$w" ] && f=$w
-  e=$(( w - f ))
-  [ "$f" -gt 0 ] && { printf -v B "%${f}s" ""; BAR="${B// /█}"; }
-  [ "$e" -gt 0 ] && { printf -v B "%${e}s" ""; BAR="${BAR}${B// /░}"; }
+  if [ "$tk" -ge 0 ]; then tk=$(( tk * w / 100 )); [ "$tk" -ge "$w" ] && tk=$(( w - 1 )); fi
+  for (( i = 0; i < w; i++ )); do
+    if [ "$i" -lt "$f" ]; then c="█"; else c="░"; fi
+    if [ "$i" -eq "$tk" ]; then out+="${FG}┃${TN}"; else out+=$c; fi
+  done
+  BAR="${TN}${out}"
 }
 
 # kfmt N → K   (950 · 9.5k · 96k · 1M · 1.2M)
@@ -140,8 +163,9 @@ span() {
 plural() { if [ "$1" -eq 1 ]; then PL="$1 $2"; else PL="$1 $2$3"; fi; }
 
 # ---------------- segment fitting ----------------
-# add LINE PRIO TEXT — lower PRIO is more important and survives longer
-add() { eval "L$1T+=(\"\$3\"); L$1P+=(\"\$2\")"; }
+# add LINE PRIO TEXT [SHORT] — lower PRIO is more important and survives longer;
+# SHORT is tried before the segment is dropped
+add() { eval "L$1T+=(\"\$3\"); L$1P+=(\"\$2\"); L$1S+=(\"\${4-}\")"; }
 
 # vlen TEXT → VL   (visible width, colour codes stripped; plain slicing,
 # because extglob patterns are pathologically slow in bash 3.2)
@@ -154,12 +178,28 @@ vlen() {
   done
   out+=$s
   VL=${#out}
+  # ⚡ is East Asian Wide: terminals draw it two columns
+  [[ $out == *⚡* ]] && { s=${out//⚡/}; VL=$(( VL + VL - ${#s} )); }
 }
 
-# print line N, dropping its least important segments until it fits
+# vtrunc TEXT N → TR   (cut to N visible columns, colour codes kept, "…" at the end)
+vtrunc() {
+  local s=$1 n=$2 c=0 seq
+  TR=""
+  while [ -n "$s" ] && [ "$c" -lt $(( n - 1 )) ]; do
+    if [[ $s == $'\033['* ]]; then
+      seq=${s%%m*}m; TR+=$seq; s=${s#"$seq"}
+    else
+      TR+=${s:0:1}; s=${s:1}; c=$(( c + 1 ))
+    fi
+  done
+  TR+="…${RST}"
+}
+
+# print line N: shrink, then drop, its least important segments until it fits
 render() {
-  local -a T P
-  eval "T=(\"\${L$1T[@]}\"); P=(\"\${L$1P[@]}\")"
+  local -a T P S
+  eval "T=(\"\${L$1T[@]}\"); P=(\"\${L$1P[@]}\"); S=(\"\${L$1S[@]}\")"
   local n=${#T[@]} i total cnt worst wi out=""
   [ "$n" -eq 0 ] && return
   while :; do
@@ -170,12 +210,21 @@ render() {
     done
     [ "$cnt" -eq 0 ] && return
     total=$(( total + (cnt - 1) * 3 ))
-    if [ "$total" -le "$MAXW" ] || [ "$cnt" -le 1 ]; then break; fi
+    [ "$total" -le "$MAXW" ] && break
+    if [ "$cnt" -le 1 ]; then
+      # one segment left and still too wide: cut it rather than overflow
+      for (( i = 0; i < n; i++ )); do
+        [ -n "${T[i]}" ] || continue
+        if [ -n "${S[i]}" ]; then T[i]=${S[i]}; S[i]=""; continue 2; fi
+        vtrunc "${T[i]}" "$MAXW"; T[i]=$TR
+      done
+      break
+    fi
     worst=-1; wi=-1
     for (( i = 0; i < n; i++ )); do
       [ -n "${T[i]}" ] && [ "${P[i]}" -ge "$worst" ] && { worst=${P[i]}; wi=$i; }
     done
-    T[wi]=""
+    if [ -n "${S[wi]}" ]; then T[wi]=${S[wi]}; S[wi]=""; else T[wi]=""; fi
   done
   for (( i = 0; i < n; i++ )); do
     [ -n "${T[i]}" ] || continue
@@ -191,15 +240,40 @@ elif [ "$COLS" -ge 100 ]; then BW=12
 else                           BW=8; fi
 LW=$BW   # limit bars match the context bar
 
-# ---------------- git: one lock-free call, cached per session ----------------
-# cache: refreshed-at, dir, branch, oid, staged, modified, untracked, conflicts, stash, ahead, behind
-GCACHE="$TMP/cc-sl-git-$SID"
-GAT=0 GDIR="" BR="" OID="" ST=0 MD=0 UN=0 CF=0 SH=0 AH=0 BH=0
-[ -f "$GCACHE" ] && { read -r GAT; read -r GDIR; read -r BR; read -r OID; read -r ST; read -r MD
-                      read -r UN;  read -r CF;   read -r SH; read -r AH;  read -r BH; } < "$GCACHE"
-int GAT 0
-if [ "$GDIR" != "$CWD" ] || [ $(( NOW - GAT )) -ge "$GIT_TTL" ]; then
+# ---------------- git: one lock-free call, cached per directory ----------------
+# Keyed by directory, so sessions in the same repo share one git call. A repo
+# whose status takes longer than GIT_SLOW_MS is marked slow: from then on
+# untracked files are skipped (-uno, the expensive part in big repos) and it
+# refreshes less often.
+# cache: refreshed-at, slow-since (0 = fast), dir, branch, oid, staged, modified,
+#        untracked, conflicts, stash, ahead, behind
+# The key escapes "_" first, so /a/b and /a_b stay distinct; the full dir is
+# stored and checked too, in case a long path's key was cut.
+GKEY=${CWD//_/__}; GKEY=${GKEY//[^A-Za-z0-9._-]/_}; [ "${#GKEY}" -gt 120 ] && GKEY=${GKEY: -120}
+GCACHE="$TMP/cc-sl-git-$GKEY"
+GAT=0 SLOW=0 GDIR="" BR="" OID="" ST=0 MD=0 UN=0 CF=0 SH=0 AH=0 BH=0
+[ -f "$GCACHE" ] && { read -r GAT; read -r SLOW; read -r GDIR; read -r BR; read -r OID; read -r ST
+                      read -r MD;  read -r UN;   read -r CF;   read -r SH; read -r AH;  read -r BH; } < "$GCACHE"
+int GAT 0; int SLOW 0
+[ "$GDIR" = "$CWD" ] || { GAT=0; SLOW=0; }
+# A slow repo skips untracked files (-uno) and refreshes less often, but every
+# GIT_SLOW_RECHECK seconds it is measured again in full, so one slow run (a
+# cold disk after boot) can't leave it in -uno mode, hiding new files, forever.
+UFLAG=-unormal; TTL=$GIT_TTL
+if [ "$SLOW" -gt 0 ] && [ $(( NOW - SLOW )) -lt "$GIT_SLOW_RECHECK" ]; then
+  UFLAG=-uno; TTL=$GIT_SLOW_TTL
+fi
+if [ $(( NOW - GAT )) -ge "$TTL" ]; then
   BR="" OID="" ST=0 MD=0 UN=0 CF=0 SH=0 AH=0 BH=0
+  GOUT="$GCACHE.out.$$"; GTIME="$GCACHE.time.$$"
+  trap 'rm -f "$GOUT" "$GTIME" "$GCACHE.$$"' EXIT   # Claude Code may kill a slow run
+  TIMEFORMAT=%3R
+  { time git --no-optional-locks -C "$CWD" status --porcelain=v2 --branch --show-stash "$UFLAG" \
+      > "$GOUT" 2>/dev/null; } 2> "$GTIME"
+  read -r GT < "$GTIME"; GT=${GT//[^0-9]/}; GT=$(( 10#${GT:-0} ))
+  if [ "$UFLAG" = -unormal ]; then
+    if [ "$GT" -gt "$GIT_SLOW_MS" ]; then SLOW=$NOW; else SLOW=0; fi
+  fi
   while IFS= read -r ln; do
     case "$ln" in
       "# branch.head "*) BR=${ln#\# branch.head } ;;
@@ -211,24 +285,44 @@ if [ "$GDIR" != "$CWD" ] || [ $(( NOW - GAT )) -ge "$GIT_TTL" ]; then
       "u "*)             CF=$(( CF + 1 )) ;;
       "? "*)             UN=$(( UN + 1 )) ;;
     esac
-  done < <(git --no-optional-locks -C "$CWD" status --porcelain=v2 --branch --show-stash 2>/dev/null)
+  done < "$GOUT"
   [ "$BR" = "(detached)" ] && BR="@${OID}"
-  printf '%s\n' "$NOW" "$CWD" "$BR" "$OID" "$ST" "$MD" "$UN" "$CF" "$SH" "$AH" "$BH" \
+  printf '%s\n' "$NOW" "$SLOW" "$CWD" "$BR" "$OID" "$ST" "$MD" "$UN" "$CF" "$SH" "$AH" "$BH" \
     > "$GCACHE.$$" 2>/dev/null && mv -f "$GCACHE.$$" "$GCACHE" 2>/dev/null
+  rm -f "$GOUT" "$GTIME"; trap - EXIT
 fi
 for v in ST MD UN CF SH AH BH; do int "$v" 0; done
 
-# ---------------- compactions: rescan the transcript only when it changed ----------------
+# ---------------- compactions: incremental transcript scan ----------------
+# Reads only the bytes appended since the last scan, and advances the offset
+# only past complete lines, so the cost stays flat however long the session.
+# cache: byte offset, count, transcript path
 CMP=0
 if [ -f "$TRANSCRIPT" ]; then
   CCACHE="$TMP/cc-sl-cmp-$SID"
-  if [ "$TRANSCRIPT" -nt "$CCACHE" ]; then
-    CMP=$(/usr/bin/grep -c '"subtype":"compact_boundary"' "$TRANSCRIPT" 2>/dev/null)
-    printf '%s\n' "${CMP:-0}" > "$CCACHE" 2>/dev/null
-  else
-    read -r CMP < "$CCACHE"
+  OFF=0 CPATH=""
+  [ -f "$CCACHE" ] && read -r OFF CMP CPATH < "$CCACHE"
+  int OFF 0; int CMP 0
+  [ "$CPATH" = "$TRANSCRIPT" ] || { OFF=0; CMP=0; CPATH=""; }
+  # mtimes compare to the second: rescan unless the cache is strictly newer,
+  # so an append in the same second as the last scan isn't missed
+  if [ -z "$CPATH" ] || [ ! "$CCACHE" -nt "$TRANSCRIPT" ]; then
+    read -r NOFF NEW RESET < <(perl -e '
+      my ($f, $o) = @ARGV; my ($n, $reset) = (0, 0);
+      open(my $h, "<", $f) or do { print "$o 0 0\n"; exit };
+      if ($o > -s $h) { $o = 0; $reset = 1 }
+      seek($h, $o, 0);
+      while (my $l = <$h>) {
+        last unless $l =~ /\n\z/;
+        $o += length $l;
+        $n++ if index($l, q{"subtype":"compact_boundary"}) >= 0;
+      }
+      print "$o $n $reset\n";' "$TRANSCRIPT" "$OFF" 2>/dev/null)
+    int NOFF "$OFF"; int NEW 0; int RESET 0
+    [ "$RESET" -eq 1 ] && CMP=0
+    CMP=$(( CMP + NEW ))
+    printf '%s %s %s\n' "$NOFF" "$CMP" "$TRANSCRIPT" > "$CCACHE.$$" 2>/dev/null && mv -f "$CCACHE.$$" "$CCACHE" 2>/dev/null
   fi
-  int CMP 0
 fi
 
 # subscription users (rate limits present) pay a plan, not this list-price estimate
@@ -255,16 +349,23 @@ esac
 [ "$FAST" = "true" ] && S="${S} ${YEL}⚡${RST}"
 add 1 0 "$S"
 
-# directory: home-relative path, so a folder named "Claude" can't read as the app
+# directory: home-relative path, so a folder named "Claude" can't read as the app;
+# short form is project-relative (or just the folder name)
 D=$CWD
 case "$D" in "$HOME") D="~" ;; "$HOME"/*) D="~/${D#"$HOME"/}" ;; esac
 [ "${#D}" -gt 40 ] && D="…${D: -39}"
-[ "$ADDED" -gt 0 ] && D="${D} ${DIM}+${ADDED}dir${RST}"
-add 1 6 "${TAN}${D}${RST}"
+DS=${CWD##*/}
+if [ -n "$PROJ" ] && [ "$CWD" != "$PROJ" ]; then
+  case "$CWD" in "$PROJ"/*) DS="${PROJ##*/}/${CWD#"$PROJ"/}" ;; esac
+fi
+[ "${#DS}" -gt 24 ] && DS="…${DS: -23}"
+DX=""; [ "$ADDED" -gt 0 ] && DX=" ${DIM}+${ADDED}dir${RST}"
+add 1 6 "${TAN}${D}${RST}${DX}" "${TAN}${DS}${RST}${DX}"
 
 if [ -n "$BR" ]; then
   [ "${#BR}" -gt 28 ] && BR="${BR:0:27}…"
-  if [ $(( ST + MD + UN + CF )) -eq 0 ]; then G="${GRN}⎇ ${BR}${RST}"; else G="${PUR}⎇ ${BR}${RST}"; fi
+  # "*" marks a dirty tree without relying on colour
+  if [ $(( ST + MD + UN + CF )) -eq 0 ]; then G="${GRN}⎇ ${BR}${RST}"; else G="${PUR}⎇ ${BR}*${RST}"; fi
   [ "$CF" -gt 0 ] && G="${G} ${RED}⚔${CF}${RST}"
   [ "$ST" -gt 0 ] && G="${G} ${GRN}+${ST}${RST}"
   [ "$MD" -gt 0 ] && G="${G} ${ORG}~${MD}${RST}"
@@ -292,36 +393,43 @@ fi
 [ -n "$VIM" ]   && add 1 2 "${BOLD}${VIM}${RST}"
 [ -n "$AGENT" ] && add 1 5 "${YEL}@${AGENT}${RST}"
 if [ -n "$SNAME" ]; then
-  [ "${#SNAME}" -gt 60 ] && SNAME="${SNAME:0:59}…"
-  add 1 8 "${DIM}“${SNAME}”${RST}"
+  SN=$SNAME;  [ "${#SN}" -gt 60 ] && SN="${SN:0:59}…"
+  SNS=$SNAME; [ "${#SNS}" -gt 24 ] && SNS="${SNS:0:23}…"
+  add 1 8 "${DIM}“${SN}”${RST}" "${DIM}“${SNS}”${RST}"
 fi
 [ -n "$STYLE" ] && [ "$STYLE" != "default" ] && add 1 9 "${DIM}style:${STYLE}${RST}"
 
 # ═════════════ LINE 2 — context, cache, cost, time ═════════════
+# context colour: the worse of % of the window and absolute size, because a
+# 1M window at 34% is still a 340k-token prompt on every turn
 kfmt "$CTXMAX"; KMAX=$K
 if [ "$PCT" -ge 0 ]; then
-  tone "$PCT"; bar "$PCT" "$BW"; kfmt "$TOK"
-  add 2 0 "${DIM}ctx${RST} ${TN}${BAR} ${PCT}%${RST} ${DIM}${K}/${KMAX}${RST}"
+  tone "$PCT"; L_PCT=$LV
+  level "$TOK" "$CTX_YEL" "$CTX_ORG" "$CTX_RED"
+  [ "$LV" -lt "$L_PCT" ] && LV=$L_PCT
+  CTX_LV=$LV; TN=${TONES[LV]}
+  bar "$PCT" "$BW"; kfmt "$TOK"
+  add 2 0 "${DIM}ctx${RST} ${BAR} ${PCT}%${RST} ${DIM}${K}/${KMAX}${RST}"
 else
-  bar 0 "$BW"
+  CTX_LV=0; TN=$DIM; bar 0 "$BW"
   add 2 0 "${DIM}ctx ${BAR} —  0/${KMAX}${RST}"
 fi
 
 if [ "$PC_ON" -eq 1 ]; then
   if [ "$PC_WARM" -eq 1 ]; then CS="${GRN}●${RST}"; else CS="${DIM}○${RST}"; fi
   CS="${CS} ${DIM}cache${RST}"
-  [ "$PC_HIT" -ge 0 ] && { tone_up "$PC_HIT"; CS="${CS} ${TU}${PC_HIT}%${RST}"; }
+  [ "$PC_HIT" -ge 0 ] && { tone_up "$PC_HIT"; CS="${CS} ${TU}${PC_HIT}%${RST} ${DIM}hit${RST}"; }
   if [ "$PC_WARM" -eq 1 ] && [ "$PC_EXP" -gt 0 ]; then
     LEFT=$(( PC_EXP - NOW )); span "$LEFT"
     if   [ "$LEFT" -lt 300 ]; then CT=$ORG
     elif [ "$LEFT" -lt 600 ]; then CT=$YEL
     else                           CT=$GRN; fi
-    CS="${CS} ${DIM}cold in${RST} ${CT}${SP}${RST}"
+    CS="${CS} ${DIM}· cold in${RST} ${CT}${SP}${RST}"
   elif [ "$PC_WARM" -eq 0 ]; then
-    CS="${CS} ${ORG}cold${RST}"
+    CS="${CS} ${DIM}·${RST} ${ORG}cold${RST}"
     [ "$PC_RECOLD" -gt 0 ] && { kfmt "$PC_RECOLD"; CS="${CS} ${DIM}(${K} to rebuild)${RST}"; }
   fi
-  [ "$PC_MISS" -gt 0 ] && { plural "$PC_MISS" miss es; CS="${CS} ${DIM}${PL}${RST}"; }
+  [ "$PC_MISS" -gt 0 ] && { plural "$PC_MISS" miss es; CS="${CS} ${DIM}· ${PL}${RST}"; }
   add 2 1 "$CS"
 fi
 
@@ -336,7 +444,7 @@ else                                    CC=$GRN; fi
 add 2 2 "${CC}${COSTS}${RST}"
 
 # active time: time Claude was working, not time the window was open
-if [ "$API_MS" -gt 0 ]; then
+if [ "$API_MS" -ge 1000 ]; then
   span $(( API_MS / 1000 ))
   add 2 6 "${DIM}⏱ ${SP} active${RST}"
 fi
@@ -347,66 +455,90 @@ fi
 [ "$CMP" -gt 0 ] && add 2 5 "${DIM}⟳${CMP}${RST}"
 
 # ═════════════ LINE 3 — usage limits ═════════════
-# pace WINDOW_SECS USED_PCT RESETS_AT → PACE = seconds until 100% at the
-# current rate, set only when that lands before the window resets
+# pace USED_PCT WINDOW_SECS RESETS_AT →
+#   EP    elapsed % of the window (-1 if unknown)
+#   RT    used% ÷ elapsed% ×100 (-1 until PACE_MIN into the window, when a few
+#         minutes of heavy use would extrapolate to nonsense)
+#   PACE  seconds until 100% at this rate, set only when that lands before the reset
 pace() {
-  local w=$1 u=$2 r=$3 left elapsed ttf
-  PACE=""
-  [ "$w" -gt 0 ] && [ "$r" -gt 0 ] && [ "$u" -gt 0 ] && [ "$u" -lt 100 ] || return
-  left=$(( r - NOW )); elapsed=$(( w - left ))
-  [ "$elapsed" -ge 900 ] && [ "$left" -gt 0 ] || return
-  ttf=$(( (100 - u) * elapsed / u ))
+  local u=$1 w=$2 r=$3 left el ttf
+  EP=-1; RT=-1; PACE=""
+  [ "$w" -gt 0 ] && [ "$r" -gt 0 ] || return
+  left=$(( r - NOW )); [ "$left" -lt 0 ] && left=0
+  el=$(( w - left ));  [ "$el" -lt 0 ] && el=0
+  EP=$(( el * 100 / w ))
+  [ "$el" -ge "$PACE_MIN" ] || return
+  RT=$(( u * w / el ))
+  [ "$u" -gt 0 ] && [ "$u" -lt 100 ] && [ "$left" -gt 0 ] || return
+  ttf=$(( (100 - u) * el / u ))
   [ "$ttf" -lt "$left" ] && PACE=$ttf
 }
 
-# limit PRIO LABEL PCT RESETS_AT WINDOW_SECS
+# limit PRIO LABEL PCT RESETS_AT WINDOW_SECS RESET_TIME
+# Colour follows pace, not the raw %: 51% used two-thirds through the week is
+# fine. At TONE_RED and above it is red whatever the pace, since the cap is near.
+ONTRACK=1
 limit() {
   local S L
   printf -v L '%-3s' "$2"   # same width as "ctx", so the bars start in one column
-  tone "$3"; bar "$3" "$LW"
-  S="${DIM}${L}${RST} ${TN}${BAR} $3%${RST}"
-  [ "$4" -gt 0 ] && { span $(( $4 - NOW )); S="${S} ${DIM}⏲ ${SP}${RST}"; }
-  pace "$5" "$3" "$4"
-  [ -n "$PACE" ] && { span "$PACE"; S="${S} ${ORG}⇡out ${SP}${RST}"; }
+  pace "$3" "$5" "$4"
+  if   [ "$3" -ge "$TONE_RED" ]; then LV=3
+  elif [ "$RT" -ge 0 ];          then level "$RT" "$PACE_YEL" "$PACE_ORG" "$PACE_RED"
+  else                                tone "$3"; fi
+  # projected to run out before the reset: at least orange, like ⇡out and its warning
+  [ -n "$PACE" ] && [ "$LV" -lt 2 ] && LV=2
+  TN=${TONES[LV]}
+  [ "$LV" -gt 0 ] && ONTRACK=0
+  bar "$3" "$LW" "$EP"
+  S="${DIM}${L}${RST} ${BAR} $3% used${RST}"
+  if [ -n "$6" ]; then
+    S="${S} ${DIM}⏲ $6"
+    # 5h only: in a short window the time left matters more than the clock time
+    [ "$5" -eq 18000 ] && [ "$4" -gt "$NOW" ] && { span $(( $4 - NOW )); S="${S} (${SP})"; }
+    S="${S}${RST}"
+  fi
+  [ -n "$PACE" ] && { span "$PACE"; S="${S} ${ORG}⇡out in ${SP}${RST}"; }
   add 3 "$1" "$S"
 }
-[ "$H5"  -ge 0 ] && limit 0 5h    "$H5"  "$H5R"  18000
-[ "$D7"  -ge 0 ] && limit 1 7d    "$D7"  "$D7R"  604800
-[ "$SPL" -ge 0 ] && limit 2 spend "$SPL" "$SPLR" 0
+[ "$H5"  -ge 0 ] && limit 0 5h    "$H5"  "$H5R"  18000  "$H5T"
+[ "$D7"  -ge 0 ] && limit 1 7d    "$D7"  "$D7R"  604800 "$D7T"
+[ "$SPL" -ge 0 ] && limit 2 spend "$SPL" "$SPLR" 0      "$SPLT"
+# one verdict, like Claude's usage page
+[ "$SUB" -eq 1 ] && [ "$ONTRACK" -eq 1 ] && add 3 3 "${GRN}✓ on track${RST}"
 
 # ═════════════ LINE 4 — live subagents ═════════════
-# cache: written-at, running count, segment
+# cache: written-at, running count, segment, short segment
 ACACHE="$TMP/cc-agents-$SID"
 if [ -f "$ACACHE" ]; then
-  { read -r AAT; read -r ACOUNT; read -r ASEG; } < "$ACACHE"
+  ASHORT=""
+  { read -r AAT; read -r ACOUNT; read -r ASEG; read -r ASHORT; } < "$ACACHE"
   int AAT 0; int ACOUNT 0
-  [ $(( NOW - AAT )) -le 20 ] && [ "$ACOUNT" -gt 0 ] && [ -n "$ASEG" ] && add 4 0 "$ASEG"
+  [ $(( NOW - AAT )) -le 20 ] && [ "$ACOUNT" -gt 0 ] && [ -n "$ASEG" ] && add 4 0 "$ASEG" "$ASHORT"
 fi
 
 # ═════════════ LINE 5 — warnings ═════════════
 W() { add 5 "$1" "${2}▲ $3${RST}"; }
 
-if   [ "$PCT" -ge "$TONE_RED" ]; then W 0 "$RED" "context ${PCT}% — /compact now"
-elif [ "$PCT" -ge "$TONE_ORG" ]; then W 1 "$ORG" "context ${PCT}% — /compact soon"
+if   [ "$CTX_LV" -ge 3 ]; then kfmt "$TOK"; W 0 "$RED" "context ${PCT}% (${K}) — /compact now"
+elif [ "$CTX_LV" -ge 2 ]; then kfmt "$TOK"; W 1 "$ORG" "context ${PCT}% (${K}) — /compact soon"
 fi
 
 [ "$CF" -gt 0 ] && { plural "$CF" "merge conflict" s; W 0 "$RED" "$PL"; }
 
-# warn_limit LABEL PCT RESETS_AT WINDOW_SECS
+# warn_limit LABEL PCT RESETS_AT WINDOW_SECS RESET_TIME
 warn_limit() {
   local r=""
-  [ "$3" -gt 0 ] && { span $(( $3 - NOW )); r=" · resets ${SP}"; }
+  [ -n "$5" ] && r=" · resets $5"
   if   [ "$2" -ge 100 ];         then W 0 "$RED" "$1 limit reached${r}"
   elif [ "$2" -ge "$TONE_RED" ]; then W 0 "$RED" "$1 limit $2%${r}"
-  elif [ "$2" -ge "$TONE_ORG" ]; then W 1 "$ORG" "$1 limit $2%${r}"
   else
-    pace "$4" "$2" "$3"
+    pace "$2" "$4" "$3"
     [ -n "$PACE" ] && { span "$PACE"; W 2 "$ORG" "$1 on pace to run out in ${SP}${r}"; }
   fi
 }
-[ "$H5"  -ge 0 ] && warn_limit 5h    "$H5"  "$H5R"  18000
-[ "$D7"  -ge 0 ] && warn_limit 7d    "$D7"  "$D7R"  604800
-[ "$SPL" -ge 0 ] && warn_limit spend "$SPL" "$SPLR" 0
+[ "$H5"  -ge 0 ] && warn_limit 5h    "$H5"  "$H5R"  18000  "$H5T"
+[ "$D7"  -ge 0 ] && warn_limit 7d    "$D7"  "$D7R"  604800 "$D7T"
+[ "$SPL" -ge 0 ] && warn_limit spend "$SPL" "$SPLR" 0      "$SPLT"
 
 if [ "$PC_ON" -eq 1 ]; then
   kfmt "$PC_RECOLD"
@@ -420,6 +552,17 @@ if [ "$PC_ON" -eq 1 ]; then
 fi
 
 [ "$BH" -gt 0 ] && W 5 "$YEL" "branch ${BH} behind upstream"
+
+# ---------------- housekeeping ----------------
+# once a day, in the background, remove cache files untouched for a week
+# (the last run time is stored inside the marker file, so the check needs no fork)
+TIDY="$TMP/cc-sl-tidy"; TAT=0
+[ -f "$TIDY" ] && read -r TAT < "$TIDY"; int TAT 0
+if [ $(( NOW - TAT )) -ge 86400 ]; then
+  printf '%s\n' "$NOW" > "$TIDY" 2>/dev/null
+  ( find "$TMP" -maxdepth 1 \( -name 'cc-sl-*' -o -name 'cc-agents-*' \) ! -name cc-sl-tidy -mtime +7 \
+      -exec rm -f {} + >/dev/null 2>&1 & )
+fi
 
 # ---------------- emit ----------------
 render 1
