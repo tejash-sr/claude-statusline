@@ -78,6 +78,12 @@ echo "Limits (pace = projected % used at the reset)"
 out=$(run "$(limits 10 16860)")
 expect "early burst stays on track"     "$out" "on track"
 reject "early burst has no projection"  "$out" "out in"
+out=$(run "$(limits 73 14460)")                                                    # 73% at 19.7%: the 00:39 screenshot
+expect "30%+ early: run-out at once"    "$out" "out in"
+expect "and warns at once"              "$out" "5h would lock you out"
+out=$(run "$(limits 30 16200)")                                                     # 30% 30 min in
+expect "exactly 30% early: judged"      "$out" "out in"
+expect "29% early: still waits"         "$(run "$(limits 29 16200)")" "on track"
 expect "under 20% used: pace ignored"   "$(run "$(limits 15 12600)")" "on track"   # 15% at 30% elapsed
 expect "projected 97%: on track"        "$(run "$(limits 21 14100)")" "on track"
 out=$(run "$(limits 26 13380)")                                                     # your case: 26% at 25.7%, ~101%
@@ -87,7 +93,13 @@ reject "and raises no warning"          "$out" "▲"
 expect "52% halfway: near pace"         "$(run "$(limits 52 9000)")" "near pace"  # 104%, run-out 12 min early
 out=$(run "$(limits 60 9000)")                                                      # 120%, 50 min early
 expect "meaningfully early: run-out"    "$out" "out in 1h40m"
-expect "and warns"                      "$out" "5h on pace to run out"
+expect "and warns"                      "$out" "5h would lock you out [45][0-9]m before reset"
+reject "warning repeats nothing"        "$out" "resets"
+fx() { jq -n --argjson n "$NOW" --arg e "$1" --arg m "$2" '{model:{display_name:$m}, effort:{level:$e}, rate_limits:{five_hour:{used_percentage:60,resets_at:($n+9000)}}}'; }
+expect "tip: both on Opus medium"       "$(run "$(fx medium "Opus 5.5")")" "try /effort low and /model sonnet"
+expect "tip: Sonnet medium → effort"    "$(run "$(fx medium "Sonnet 5.5")")" "try /effort low$"
+expect "tip: already low → Sonnet"      "$(run "$(fx low "Opus 5.5")")" "try /model sonnet"
+reject "tip: low Sonnet → none"         "$(run "$(fx low "Sonnet 5.5")")" "try /"
 expect "≥90% warns regardless"          "$(run "$(limits 92 1800)")" "5h limit 92%"
 expect "past reset shows new window"    "$(run "$(limits 80 -100)")" "reset · new window"
 expect "5h shows a countdown"           "$(run "$(limits 30 5010)")" "(1h23m)"   # 1h23m30s: margin for the clock ticking

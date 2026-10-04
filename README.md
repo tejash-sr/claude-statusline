@@ -20,7 +20,7 @@ A fifth line of `▲` warnings appears only when something needs attention.
 | 2 · session | context bar, prompt cache (hit rate, time until it goes cold, session misses), estimated cost, active time, lines changed, compactions |
 | 3 · limits | 5-hour, 7-day and spend limits, like Claude's usage page: % used, reset time, an elapsed-time tick on the bar, and a verdict for each limit (`✓ on track`, `≈ near pace`, or `⇡out in 2h02m` when you'll run out well before the reset). A window whose reset has passed shows `reset · new window` until fresh numbers arrive |
 | 4 · agents | running subagents, largest first, with context use, tokens and age. Agents with Claude Code's generic name (`local_agent`) are labelled by their type (`code-reviewer`) |
-| 5 · warnings | only when needed: context getting large, limits near the cap or on pace to run out, cache about to go cold, merge conflicts, branch behind upstream |
+| 5 · warnings | only when needed: context getting large, limits near the cap or on pace to run out (how long you'd be locked out before the reset, with `/effort low` and `/model sonnet` tips that still apply), cache about to go cold, merge conflicts, branch behind upstream |
 
 **Colours mean something.**
 
@@ -98,6 +98,7 @@ PACE_MARGIN_PCT=10                          # run-out counts only this % of the 
 PACE_MIN=900                                # seconds into a window before pace counts
 PACE_MIN_PCT=20                             # …and % of the window (1h of 5h, ~34h of 7d)
 PACE_ALARM=20                               # % used before pace counts at all (colour, verdict, ⇡out, warning)
+PACE_FAST=30                                # % used at which pace counts at once, skipping the two waits above
 COST_YEL=100; COST_ORG=500; COST_RED=2000   # cents (API-key users; dimmed on a plan)
 GIT_TTL=5                                   # seconds between git refreshes
 GIT_SLOW_MS=150                             # slower than this → skip untracked files (-uno)

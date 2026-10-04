@@ -30,6 +30,7 @@ PACE_MARGIN_PCT=10                          # run-out counts only this % of the 
 PACE_MIN=900                                # seconds into a window before pace counts
 PACE_MIN_PCT=20                             # …and % of the window (1h of 5h, ~34h of 7d)
 PACE_ALARM=20                               # % used before pace counts at all (colour, verdict, ⇡out, warning)
+PACE_FAST=30                                # % used at which pace counts at once, skipping the two waits above
 COST_YEL=100; COST_ORG=500; COST_RED=2000   # cents (API-key users; dimmed on a plan)
 GIT_TTL=5                                   # seconds between git refreshes
 GIT_SLOW_MS=150                             # slower than this → skip untracked files (-uno)
@@ -509,7 +510,8 @@ fi
 # pace USED_PCT WINDOW_SECS RESETS_AT →
 #   EP    elapsed % of the window (-1 if unknown)
 #   RT    projected % used at the reset at the current rate (used% ÷ elapsed% ×100);
-#         -1 until PACE_MIN and PACE_MIN_PCT into the window, or below PACE_ALARM used
+#         -1 until PACE_MIN and PACE_MIN_PCT into the window, or below PACE_ALARM used;
+#         from PACE_FAST used it counts at once (that much is real use, not a burst)
 #   PACE  seconds until 100% at this rate, set only when that lands at least
 #         PACE_MARGIN_PCT of the window before the reset
 pace() {
@@ -521,7 +523,10 @@ pace() {
   EP=$(( el * 100 / w ))
   # early in a window a short burst extrapolates to nonsense (10% used 19 minutes
   # into 5h reads as "out in 2h50m"); with little used there is nothing to judge
-  [ "$el" -ge "$PACE_MIN" ] && [ "$EP" -ge "$PACE_MIN_PCT" ] && [ "$u" -ge "$PACE_ALARM" ] || return
+  if [ "$u" -lt "$PACE_FAST" ]; then
+    [ "$el" -ge "$PACE_MIN" ] && [ "$EP" -ge "$PACE_MIN_PCT" ] && [ "$u" -ge "$PACE_ALARM" ] || return
+  fi
+  [ "$el" -gt 0 ] || return
   RT=$(( u * w / el ))
   [ "$u" -lt 100 ] && [ "$left" -gt 0 ] || return
   ttf=$(( (100 - u) * el / u ))
@@ -606,8 +611,18 @@ warn_limit() {
   if   [ "$2" -ge 100 ];         then W 0 "$RED" "$1 limit reached${r}"
   elif [ "$2" -ge "$TONE_RED" ]; then W 0 "$RED" "$1 limit $2%${r}"
   else
+    # the row already shows "out in" and the reset time, so say what it means:
+    # how long you would be locked out, and what stretches the limit
     pace "$2" "$4" "$3"
-    [ -n "$PACE" ] && { span "$PACE"; W 2 "$ORG" "$1 on pace to run out in ${SP}${r}"; }
+    [ -n "$PACE" ] && {
+      local tip=""
+      case "$EFFORT" in low|"") ;; *) tip="/effort low" ;; esac
+      case "$MODEL_ID $MODEL" in *[Oo]pus*) tip="${tip:+$tip and }/model sonnet" ;; esac
+      [ -n "$tip" ] && tip=" — try $tip"
+      span $(( $3 - NOW - PACE ))
+      add 5 2 "${ORG}▲ $1 would lock you out ${SP} before reset${tip}${RST}" \
+              "${ORG}▲ $1 locked out ${SP} early${RST}"
+    }
   fi
 }
 [ "$H5"  -ge 0 ] && warn_limit 5h    "$H5"  "$H5R"  18000  "$H5T"
