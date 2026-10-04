@@ -2,7 +2,7 @@
 # ~/.claude/statusline.sh — Claude Code status line
 #
 #   1  identity  model:effort ⚡ │ dir │ git │ worktree │ PR │ agent │ session
-#   2  session   context bar │ prompt cache │ ~cost │ churn │ compactions
+#   2  session   context bar │ prompt cache │ ~cost │ compactions
 #   3  limits    5h │ 7d │ spend  (pace-coloured bars, elapsed tick, reset time, verdict each)
 #   4  agents    live subagents (written by ~/.claude/subagent-statusline.sh)
 #   5  warnings  only when something needs attention
@@ -495,9 +495,6 @@ elif [ "$CENTS" -ge "$COST_YEL" ]; then CC=$YEL
 else                                    CC=$GRN; fi
 add 2 2 "${CC}${COSTS}${RST}"
 
-if [ "$ADD" -gt 0 ] || [ "$DEL" -gt 0 ]; then
-  add 2 4 "${GRN}+${ADD}${RST}${DIM}/${RST}${RED}-${DEL}${RST}"
-fi
 [ "$CMP" -gt 0 ] && add 2 5 "${DIM}⟳${CMP}${RST}"
 
 # ═════════════ LINE 3 — usage limits ═════════════

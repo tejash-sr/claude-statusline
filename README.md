@@ -5,7 +5,7 @@ custom row renderer for the subagent panel.
 
 ```
 Opus 5.5:medium │ ~/Documents/project │ ⎇ main* +1 ~2 ?1 ↑1 │ #1234 ✓ │ "refactor auth middleware"
-ctx   ██████░░░░░░░░░░░░░░ 34% 344k/1M │ ● cache 96% hit · cold in 57m · 3 misses │ ~$7.43 │ +412/-87
+ctx   ██████░░░░░░░░░░░░░░ 34% 344k/1M │ ● cache 96% hit · cold in 57m · 3 misses │ ~$7.43
 5h    ██████░░░░░░░┃░░░░░░ 30% ⏲ 7:10 PM (1h23m) ✓ on track │ 7d    ██████████┃░░░░░░░░░ 50% ⏲ Mon 1:30 AM ✓ on track
 agents 2 ✔1 │ ▶ code-reviewer █░░░ 41% 82k 1m36s │ ▶ Explore █░░░ 18% 36k 40s │ 118k tok
 ```
@@ -17,7 +17,7 @@ A fifth line of `▲` warnings appears only when something needs attention.
 | Line | Contents |
 |---|---|
 | 1 · identity | model and effort, fast mode, home-relative directory, git (branch with a `*` when dirty; staged, modified, untracked, stash, ahead/behind, conflicts), worktree, PR status, agent, vim mode, session name |
-| 2 · session | context bar, prompt cache (hit rate, time until it goes cold, session misses), estimated cost, lines changed, compactions |
+| 2 · session | context bar, prompt cache (hit rate, time until it goes cold, session misses), estimated cost, compactions |
 | 3 · limits | 5-hour, 7-day and spend limits, like Claude's usage page: % used, reset time, an elapsed-time tick on the bar, and a verdict for each limit (`✓ on track`, `≈ near pace`, or `⇡out in 2h02m` when you'll run out well before the reset). A window whose reset has passed shows `reset · new window` until fresh numbers arrive |
 | 4 · agents | running subagents, largest first, with context use, tokens and age. Agents with Claude Code's generic name (`local_agent`) are labelled by their type (`code-reviewer`) |
 | 5 · warnings | only when needed: context getting large, limits near the cap or on pace to run out (how long you'd be locked out before the reset, with `/effort low` and `/model sonnet` tips that still apply), cache about to go cold, merge conflicts, branch behind upstream |
