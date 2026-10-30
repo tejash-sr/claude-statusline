@@ -12,6 +12,26 @@ agents 2 ✔1 │ ▶ code-reviewer █░░░ 41% 82k 1m36s │ ▶ Explore �
 
 A fifth line of `▲` warnings appears only when something needs attention.
 
+## Why I built it
+
+I use Claude Code for hours a day, and the default status line didn't show the things that actually decide how a session goes:
+
+- **How full the context is.** Long sessions quietly fill the context window until answers get worse or a compaction hits.
+- **Whether the prompt cache is about to go cold.** After a pause the cache expires, and the next message re-sends the whole conversation, which costs time and money.
+- **Whether I'm on pace to run out of my usage limits.** I only found out I'd hit the 5-hour or 7-day limit when it happened, in the middle of work.
+
+So I built a status line that answers those questions at a glance, without being noisy.
+
+**The key idea: judge limits by pace, not by percentage.** A fixed rule like "yellow at 50%" cries wolf: 51% used late in the week is fine, while 30% used in the first hour of a 5-hour window is not. Each limit is coloured by its **projected usage at reset** (used % ÷ elapsed % of the window), with a margin so a near tie doesn't flicker into an alarm. When a limit will run out early, the warning says how long you'd be locked out before it resets.
+
+## How I built it with AI
+
+I built it **with Claude Code itself**, iterating from screenshots of real sessions: every time a colour or warning looked wrong, I worked out the cause before changing it, and the tests had to pass before anything counted as done.
+
+To check the result, I had **two independent AI code reviewers** (Claude Code subagents) audit the scripts. They scored it about 8/10. I fixed every valid finding, and **rejected two findings after checking them against the Claude Code documentation**: one reviewer claimed `context_window.total_input_tokens` is cumulative across the session (it isn't), and another that `session_id` is missing from the subagent payload (it's there). AI review is useful input, not the final word.
+
+**Result:** about 12 ms per redraw, no network calls, runs on stock macOS Bash 3.2, and **47 automated tests**.
+
 ## What it shows
 
 | Line | Contents |
